@@ -6,7 +6,9 @@ import pandas as pd
 # List of stock tickers to display (preselected in the multiselect)
 TICKERS = [
     "AAPL", "AMZN", "APP", "ABT", "PEP", "TSLA", "NVDA", "AMD",
-    "SNOW", "NET", "PLTR", "MU", "ORCL", "TSM"
+    "SNOW", "NET", "PLTR", "MU", "ORCL", "TSM", "SPY", "QQQ",
+    "IWM", "DIA", "VIX", "TLT", "XLK", "XLF", "XLP", "XLE",
+    "SMH", "XLI", "XLV", "UUP", "GLD"
 ]
 
 @st.cache_data(ttl=60 * 60)  # cache results for 1 hour
