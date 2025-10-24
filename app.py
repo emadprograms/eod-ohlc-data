@@ -7,7 +7,7 @@ import pandas as pd
 TICKERS = [
     "AAPL", "AMZN", "APP", "ABT", "PEP", "TSLA", "NVDA", "AMD",
     "SNOW", "NET", "PLTR", "MU", "ORCL", "TSM", "SPY", "QQQ",
-    "IWM", "DIA", "VIX", "TLT", "XLK", "XLF", "XLP", "XLE",
+    "IWM", "DIA", "TLT", "XLK", "XLF", "XLP", "XLE",
     "SMH", "XLI", "XLV", "UUP", "GLD"
 ]
 

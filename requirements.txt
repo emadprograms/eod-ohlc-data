@@ -1,2 +1,3 @@
  streamlit==1.50.0
  yfinance==0.2.66
+ lxml-html-clean==0.1.1
