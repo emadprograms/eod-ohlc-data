@@ -2,12 +2,13 @@ import streamlit as st
 import yfinance as yf
 import datetime as dt
 import pandas as pd
+import requests
 
 # List of stock tickers to display (preselected in the multiselect)
 TICKERS = [
     "AAPL", "AMZN", "APP", "ABT", "PEP", "TSLA", "NVDA", "AMD",
     "SNOW", "NET", "PLTR", "MU", "ORCL", "TSM", "SPY", "QQQ",
-    "IWM", "DIA", "TLT", "XLK", "XLF", "XLP", "XLE",
+    "IWM", "DIA", "VIX", "TLT", "XLK", "XLF", "XLP", "XLE",
     "SMH", "XLI", "XLV", "UUP", "GLD"
 ]
 
@@ -20,7 +21,9 @@ def get_previous_trading_day_data(ticker_symbol: str):
     Returns a pandas Series for the last row or None.
     """
     try:
-        stock = yf.Ticker(ticker_symbol)
+        session = requests.Session()
+        session.headers['User-Agent'] = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+        stock = yf.Ticker(ticker_symbol, session=session)
         hist = stock.history(period="5d")
         if not hist.empty:
             return hist.iloc[-1]
