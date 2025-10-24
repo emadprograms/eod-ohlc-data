@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import datetime as dt
 import pandas as pd
+# The 'requests' import is no longer needed for the data fetching function
 import requests
 
 # List of stock tickers to display (preselected in the multiselect)
@@ -21,14 +22,14 @@ def get_previous_trading_day_data(ticker_symbol: str):
     Returns a pandas Series for the last row or None.
     """
     try:
-        session = requests.Session()
-        session.headers['User-Agent'] = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
-        stock = yf.Ticker(ticker_symbol, session=session)
+        # Let yfinance handle its own session management with curl_cffi
+        stock = yf.Ticker(ticker_symbol)
         hist = stock.history(period="5d")
         if not hist.empty:
             return hist.iloc[-1]
-    except Exception:
-        # Let the caller handle reporting
+    except Exception as e:
+        # Log the specific error to the Streamlit app for better debugging.
+        st.error(f"An error occurred while fetching data for {ticker_symbol}: {e}")
         return None
     return None
 
@@ -60,8 +61,8 @@ else:
         for ticker in selected_tickers:
             data = get_previous_trading_day_data(ticker)
 
-            if data is None or (hasattr(data, "empty") and data.empty):
-                st.warning(f"No data returned for {ticker}. The ticker might be delisted or incorrect.")
+            # The function now handles its own error reporting, so we just need to check for None.
+            if data is None:
                 continue
 
             try:
