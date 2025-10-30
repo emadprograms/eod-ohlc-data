@@ -5,3 +5,4 @@ curl_cffi>=0.5.6
 deepdiff>=8.6.1
 Pillow>=9.0.0
 pytesseract>=0.3.10
+google-generativeai>=0.5.0
