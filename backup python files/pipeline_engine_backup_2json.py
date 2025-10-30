@@ -6,993 +6,1012 @@ import json
 import time
 import requests
 import pandas as pd
-from datetime import date
-from deepdiff import DeepDiff # Import DeepDiff
+# yfinance is no longer needed for this file
+from datetime import date, datetime, timedelta, timezone # Added timezone
+try:
+    from pytz import timezone as pytz_timezone
+    US_EASTERN = pytz_timezone('US/Eastern')
+    BAHRAIN_TZ = pytz_timezone('Asia/Bahrain') # Added Bahrain timezone
+except ImportError:
+    from datetime import timezone
+    # This will be logged as a warning in the UI
+    st.warning("`pytz` library not found. Pre-market/display time checks may be less accurate. Consider `pip install pytz`.")
+    US_EASTERN = timezone(timedelta(hours=-5)) # Fallback to EST
+    BAHRAIN_TZ = timezone(timedelta(hours=3)) # Fallback to Bahrain time +03:00
+
+from deepdiff import DeepDiff
+import random # --- ADDED FOR RANDOM KEY SELECTION ---
 
 # --- Constants ---
 DATABASE_FILE = "analysis_database.db"
-# Model name confirmed from your 'check_models.py' output
-MODEL_NAME = "gemini-2.5-pro" 
+MODEL_NAME = "gemini-2.5-pro"
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent"
 
-API_KEYS = [
-    "AIzaSyAqpeu5F69PkcggYFjRk5saI-NqEu6sK_0",
-    "AIzaSyB9c_F5ma0zWzkILWjGKj9EnSFLQpd-zKw",
-    "AIzaSyAxg5Keaofj9EGmUB5llDL2aRMEqqAcv5g",
-    "AIzaSyCaQdJRth9rS3cxSSpPvyqjO2GodFEDIgw",
-]
+# --- *** NEW: Load Gemini API Keys from Secrets *** ---
+gemini_secrets = st.secrets.get("gemini", {})
+API_KEYS = gemini_secrets.get("api_keys", []) # Get the list of keys
+# --- End New Section ---
 
-# This is the 6-part "Company Overview Card" JSON template.
-# This is the "Living Document" that the AI will update daily.
+
+# Default JSON structure - This is the primary "Company Overview Card"
 DEFAULT_COMPANY_OVERVIEW_JSON = """
 {
-  "marketNote": "Company Name (TICKER)",
-  "confidence": "Medium - Awaiting new data",
-  "screener_briefing": "No analysis yet. Awaiting first data run.",
+  "marketNote": "Executor's Battle Card: TICKER",
+  "confidence": "Medium - Awaiting confirmation",
+  "screener_briefing": "AI Updates: High-level bias for screener. Ignore for trade decisions.",
   "basicContext": {
     "tickerDate": "TICKER | YYYY-MM-DD",
-    "sector": "e.g., Technology",
-    "companyDescription": "e.g., Designs and sells...",
-    "priceTrend": "e.g., Describe current trend...",
-    "recentCatalyst": "e.g., Earnings next week, Post-CPI drift, etc."
+    "sector": "Set in Static Editor / Preserved",
+    "companyDescription": "Set in Static Editor / Preserved",
+    "priceTrend": "AI Updates: Cumulative trend relative to major levels",
+    "recentCatalyst": "Set in Static Editor, AI may update if action confirms"
   },
   "technicalStructure": {
-    "tradingRange": "e.g., $150 support - $160 resistance",
-    "support": "Key support levels",
-    "resistance": "Key resistance levels",
-    "pattern": "e.g., Consolidation, Breakout, etc.",
-    "keyAction": "Last major price action",
-    "volumeMomentum": "e.g., Volume declining, RSI neutral"
+    "majorSupport": "AI RULE: READ-ONLY. Update only if decisively broken & confirmed over multiple days.",
+    "majorResistance": "AI RULE: READ-ONLY. Update only if decisively broken & confirmed over multiple days.",
+    "keyAction": "AI RULE: APPEND today's action relative to major levels to continue the 2-3 day story.",
+    "pattern": "AI Updates: Current pattern based on cumulative action.",
+    "volumeMomentum": "AI Updates: Volume qualifier for action AT key levels."
   },
   "fundamentalContext": {
-    "valuation": "e.g., Premium, Fair, Discounted",
-    "analystSentiment": "e.g., Avg target $180",
-    "insiderActivity": "e.g., Consistent net selling",
-    "peerPerformance": "e.g., Outperforming sector"
+    "valuation": "AI RULE: READ-ONLY (Set during initialization/manual edit)",
+    "analystSentiment": "AI RULE: READ-ONLY (Set during initialization/manual edit)",
+    "insiderActivity": "AI RULE: READ-ONLY (Set during initialization/manual edit)",
+    "peerPerformance": "AI Updates: How stock performed relative to peers today."
   },
   "behavioralSentiment": {
-    "buyerVsSeller": "Describe the balance of power...",
-    "emotionalTone": "e.g., Confident, Anxious, Complacent",
-    "newsReaction": "e.g., Absorbed bad news well"
+    "buyerVsSeller": "AI Updates: Who won the battle at MAJOR levels today?",
+    "emotionalTone": "AI Updates: Current market emotion for this stock.",
+    "newsReaction": "AI Updates: How did price react to news relative to levels?"
   },
-  "biasStrategy": {
-    "bias": "e.g., Bullish, Bearish, Neutral",
-    "triggersBullish": "e.g., Breakout above $160",
-    "triggersBearish": "e.g., Failure below $150",
-    "riskZones": "e.g., Thesis fails below $145",
-    "timingAwareness": "e.g., Fed meeting next week"
+  "openingTradePlan": {
+    "planName": "AI Updates: Primary plan (e.g., 'Long from Major Support')",
+    "knownParticipant": "AI Updates: Who is confirmed at the level?",
+    "expectedParticipant": "AI Updates: Who acts if trigger hits?",
+    "trigger": "AI Updates: Specific price action validating this plan.",
+    "invalidation": "AI Updates: Price action proving this plan WRONG."
   },
-  "sentimentSummary": [
-    "Your high-level summary line 1.",
-    "Your high-level summary line 2."
-  ]
+  "alternativePlan": {
+    "planName": "AI Updates: Competing plan (e.g., 'Failure at Major Resistance')",
+    "scenario": "AI Updates: When does this plan become active?",
+    "knownParticipant": "AI Updates: Who is confirmed if scenario occurs?",
+    "expectedParticipant": "AI Updates: Who acts if trigger hits?",
+    "trigger": "AI Updates: Specific price action validating this plan.",
+    "invalidation": "AI Updates: Price action proving this plan WRONG."
+  }
 }
 """
+# --- US Market Timezone Constants ---
+PREMARKET_START_HOUR = 4
+PREMARKET_END_HOUR = 9
+PREMARKET_END_MINUTE = 30
+
 
 # --- Logger Class ---
 class AppLogger:
-    """Helper to log messages to the Streamlit UI (inside an expander) or console."""
     def __init__(self, st_container=None):
         self.st_container = st_container
-        
     def log(self, message):
-        """Logs a message to the appropriate output."""
-        if self.st_container:
-            # Use markdown for potentially better formatting of changes
-            self.st_container.markdown(message, unsafe_allow_html=True) 
-        else:
-            print(message)
+        safe_message = str(message).replace('<', '&lt;').replace('>', '&gt;')
+        if self.st_container: self.st_container.markdown(safe_message, unsafe_allow_html=True)
+        else: print(message)
+    def log_code(self, data, language='json'):
+        try:
+            if isinstance(data, dict): formatted_data = json.dumps(data, indent=2, ensure_ascii=False)
+            elif isinstance(data, str):
+                 try: formatted_data = json.dumps(json.loads(data), indent=2, ensure_ascii=False)
+                 except: formatted_data = data
+            else: formatted_data = str(data)
+            escaped_data = formatted_data.replace('`', '\\`')
+            log_message = f"```{language}\n{escaped_data}\n```"
+            if self.st_container: self.st_container.markdown(log_message, unsafe_allow_html=False)
+            else: print(log_message)
+        except Exception as e: self.log(f"Err format log: {e}"); self.log(str(data))
 
-# --- 1. Parsing Function (Unchanged) ---
+# --- Parsing Function (For EOD) ---
 def parse_raw_summary(raw_text: str) -> dict:
     """
-    Parses the structured text summary from the 'Processor' app into a dictionary
-    for database storage. This is Step 1: "Parse".
+    Parses the structured text summary from the 'Processor' app (for EOD).
     """
     data = {"raw_text_summary": raw_text}
-    
-    # Helper function for safe regex search
     def find_value(pattern, text, type_conv=float):
         match = re.search(pattern, text, re.DOTALL)
         if match:
-            try:
-                # Group 1 is the price/value (excluding the $)
-                return type_conv(match.group(1).replace(',', '')) 
-            except ValueError:
+            val_str = match.group(1).replace(',', '').strip();
+            if not val_str: return None
+            try: return type_conv(val_str)
+            except:
+                if type_conv == str: return val_str
                 return None
         return None
-
-    # --- Extracting data using regex based on the Streamlit output format ---
-    
-    data['ticker'] = find_value(r"Summary: (\w+)", raw_text, type_conv=str)
-    data['date'] = find_value(r"\| ([\d\-]+)", raw_text, type_conv=str)
-    data['open'] = find_value(r"Open: \$([\d\.]+)", raw_text)
-    data['close'] = find_value(r"Close: \$([\d\.]+)", raw_text)
-    data['high'] = find_value(r"High of Day \(HOD\): \$([\d\.]+)", raw_text)
-    data['low'] = find_value(r"Low of Day \(LOD\): \$([\d\.]+)", raw_text)
-    data['poc'] = find_value(r"Point of Control \(POC\): \$([\d\.]+)", raw_text)
-    data['vah'] = find_value(r"Value Area High \(VAH\): \$([\d\.]+)", raw_text)
-    data['val'] = find_value(r"Value Area Low \(VAL\): \$([\d\.]+)", raw_text)
-    data['vwap'] = find_value(r"Session VWAP: \$([\d\.]+)", raw_text)
-    or_match = re.search(r"Opening Range: \$([\d\.]+) - \$([\d\.]+)", raw_text)
-    if or_match:
-        orl_match = re.search(r"Opening Range: \$([\d\.]+) -", raw_text)
-        orh_match = re.search(r" - \$([\d\.]+)", raw_text)
-        data['orl'] = float(orl_match.group(1)) if orl_match and orl_match.group(1) else None
-        data['orh'] = float(orh_match.group(1)) if orh_match and orh_match.group(1) else None
-    else:
-        data['orl'] = None
-        data['orh'] = None
+    data['ticker'] = find_value(r"Summary:\s*(\w+)", raw_text, str)
+    data['date'] = find_value(r"\|\s*([\d\-]+)", raw_text, str)
+    data['open'] = find_value(r"Open:\s*\$([\d\.]+)", raw_text)
+    data['close'] = find_value(r"Close:\s*\$([\d\.]+)", raw_text)
+    data['high'] = find_value(r"High.*:\s*\$([\d\.]+)", raw_text)
+    data['low'] = find_value(r"Low.*:\s*\$([\d\.]+)", raw_text)
+    data['poc'] = find_value(r"POC.*:\s*\$([\d\.]+)", raw_text)
+    data['vah'] = find_value(r"VAH.*:\s*\$([\d\.]+)", raw_text)
+    data['val'] = find_value(r"VAL.*:\s*\$([\d\.]+)", raw_text)
+    data['vwap'] = find_value(r"VWAP.*:\s*\$([\d\.]+)", raw_text)
+    or_match = re.search(r"Opening Range:\s*\$([\d\.]+)\s*-\s*\$([\d\.]+)", raw_text)
+    data['orl'] = float(or_match.group(1)) if or_match else None
+    data['orh'] = float(or_match.group(2)) if or_match else None
     return data
 
-# --- 2. Gemini API Call Function (Unchanged) ---
+# --- Gemini API Call Function ---
 def call_gemini_api(prompt: str, api_key: str, system_prompt: str, logger: AppLogger, max_retries=5) -> str:
     """
-    Calls the Gemini API with the specified prompt and a specific API key.
-    Implements exponential backoff and retries.
+    Calls the Gemini API, handles key switching and retries.
     """
-    
-    if not api_key:
-        logger.log("Error: No API Key was provided for this call.")
-        return None
+    current_api_key = api_key
+    # Check if API_KEYS list is available and has keys
+    if not API_KEYS or len(API_KEYS) == 0:
+         logger.log("Error: No Gemini API keys found in st.secrets.")
+         return None
+         
+    if not current_api_key: 
+        logger.log("Error: No API Key provided for this call, selecting one at random.")
+        current_api_key = random.choice(API_KEYS) # Select random key if none provided
         
-    gemini_api_url = f"{API_URL}?key={api_key}"
-    
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "systemInstruction": {
-            "parts": [{"text": system_prompt}]
-        },
-    }
-    headers = {'Content-Type': 'application/json'}
-    
     for i in range(max_retries):
+        gemini_api_url = f"{API_URL}?key={current_api_key}"
+        payload = {"contents": [{"parts": [{"text": prompt}]}], "systemInstruction": {"parts": [{"text": system_prompt}]}}
+        headers = {'Content-Type': 'application/json'}
+        current_key_index = API_KEYS.index(current_api_key) if current_api_key in API_KEYS else -1
         try:
-            # Increased timeout for the larger Pro model and complex prompts
-            response = requests.post(gemini_api_url, headers=headers, data=json.dumps(payload), timeout=60) 
-            
-            if response.status_code != 200:
-                if response.status_code in [429, 500, 503] and i < max_retries - 1:
-                    logger.log(f"API Error {response.status_code}. Retrying in {2**i}s... (Attempt {i+1}/{max_retries})")
-                    time.sleep(2**i)
-                    continue
-                else:
-                    logger.log(f"Final API Error {response.status_code}: {response.text}")
-                    return None
-            
+            response = requests.post(gemini_api_url, headers=headers, data=json.dumps(payload), timeout=90)
+            if response.status_code in [429, 503]:
+                logger.log(f"API Error {response.status_code} on Key #{current_key_index + 1}. Switching...")
+                if current_key_index != -1 and len(API_KEYS) > 1:
+                    # Switch to a new *random* key to avoid sequential failures
+                    new_key_index = random.randint(0, len(API_KEYS) - 1)
+                    # Ensure we don't pick the same key if possible
+                    if len(API_KEYS) > 1:
+                        while new_key_index == current_key_index:
+                            new_key_index = random.randint(0, len(API_KEYS) - 1)
+                    current_api_key = API_KEYS[new_key_index]
+                    logger.log(f"   ...Switched to random Key #{new_key_index + 1}.")
+                else: logger.log("   ...Cannot switch (only one key?). Retrying same key.")
+                delay = 2**i; logger.log(f"   ...Retry in {delay}s..."); time.sleep(delay); continue
+            elif response.status_code != 200:
+                logger.log(f"API Error {response.status_code}: {response.text} (Key #{current_key_index + 1})")
+                if i < max_retries - 1: delay = 2**i; logger.log(f"   ...Retry in {delay}s..."); time.sleep(delay); continue
+                else: logger.log("   ...Final fail."); return None
             result = response.json()
-            
-            # Defensive coding to check nested structure before accessing 'text'
             candidates = result.get("candidates")
             if candidates and len(candidates) > 0:
                 content = candidates[0].get("content")
                 if content:
                     parts = content.get("parts")
                     if parts and len(parts) > 0:
-                         text_part = parts[0].get("text")
-                         if text_part is not None: # Check if text exists
+                        text_part = parts[0].get("text")
+                        if text_part is not None:
                             return text_part.strip()
-
-            # If any part of the structure is missing or text is None, log error
-            logger.log(f"Error: API response format is invalid or empty. Response: {json.dumps(result, indent=2)}") 
-            return None
-
-
+            logger.log(f"Invalid API response (Key #{current_key_index + 1}): {json.dumps(result, indent=2)}")
+            if i < max_retries - 1: delay = 2**i; logger.log(f"   ...Retry in {delay}s..."); time.sleep(delay); continue
+            else: return None
+        except requests.exceptions.Timeout:
+             logger.log(f"API Timeout (Key #{current_key_index + 1}). Retry {i+1}/{max_retries}...")
+             if i < max_retries - 1: time.sleep(2**i)
         except requests.exceptions.RequestException as e:
-            logger.log(f"API Request failed: {e}. Retrying in {2**i}s... (Attempt {i+1}/{max_retries})")
-            time.sleep(2**i)
-            
-    logger.log(f"Error: Failed to get response from Gemini API after {max_retries} retries.")
-    return None
+            logger.log(f"API Request fail: {e} (Key #{current_key_index + 1}). Retry {i+1}/{max_retries}...");
+            if i < max_retries - 1: time.sleep(2**i)
+    logger.log(f"API failed after {max_retries} retries."); return None
 
-
-# --- 3. Workflow #1: The "Daily Note Generator" (FINAL "Single Document" Version) ---
+# --- Workflow #1: Daily Note Generator (Unchanged) ---
 def update_stock_note(ticker_to_update: str, new_raw_text: str, api_key_to_use: str, logger: AppLogger):
     """
-    This is the FINAL "Note Update Engine" (Workflow #1).
-    It generates the NEW 6-part "Company Overview Card" JSON by synthesizing
-    yesterday's card, the static context, and today's 5-min data.
+    Updates the main EOD card in the database based on the EOD processor text.
     """
-    logger.log(f"--- Starting update for {ticker_to_update} ---")
-    
+    logger.log(f"--- Starting EOD update for {ticker_to_update} ---")
     conn = None
     try:
-        # --- Connect to the database ---
-        conn = sqlite3.connect(DATABASE_FILE)
-        # Use Row factory to get results as dictionaries
-        conn.row_factory = sqlite3.Row 
-        cursor = conn.cursor()
-
-        # --- Step 1: Parse ---
-        logger.log("1. Parsing raw summary...")
-        parsed_data = parse_raw_summary(new_raw_text)
+        conn = sqlite3.connect(DATABASE_FILE); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+        logger.log("1. Parsing raw summary..."); parsed_data = parse_raw_summary(new_raw_text)
         trade_date = parsed_data.get('date', date.today().isoformat())
+        ticker_from_parse = parsed_data.get('ticker')
+        if not ticker_from_parse: logger.log(f"Warn: No Ticker parsed for {ticker_to_update}. Using provided.");
+        elif ticker_from_parse != ticker_to_update: logger.log(f"Warn: Ticker mismatch ({ticker_from_parse} vs {ticker_to_update}). Using {ticker_from_parse}."); ticker_to_update = ticker_from_parse
+        if not ticker_to_update: logger.log("Error: No ticker."); return
         
-        if not parsed_data.get('ticker'):
-            logger.log("Error: Could not parse Ticker from raw text. Aborting.")
-            return
-
-        # --- Step 2: Load (to data_archive) ---
-        logger.log("2. Archiving raw data...")
-        archive_columns = [
-            'ticker', 'date', 'raw_text_summary', 'open', 'high', 'low', 'close',
-            'poc', 'vah', 'val', 'vwap', 'orl', 'orh'
-        ]
-        archive_values = tuple(parsed_data.get(col, None) for col in archive_columns)
+        logger.log("2. Archiving raw data...");
+        archive_columns = ['ticker','date','raw_text_summary','open','high','low','close','poc','vah','val','vwap','orl','orh']
+        parsed_data['ticker'] = ticker_to_update
+        archive_values = tuple(parsed_data.get(col) for col in archive_columns)
+        cursor.execute(f"INSERT OR REPLACE INTO data_archive ({','.join(archive_columns)}) VALUES ({','.join(['?']*len(archive_columns))})", archive_values)
+        conn.commit(); logger.log("   ...archived.")
         
-        cursor.execute(f"""
-            INSERT OR REPLACE INTO data_archive ({', '.join(archive_columns)})
-            VALUES ({', '.join(['?'] * len(archive_columns))})
-        """, archive_values)
-        conn.commit()
-        logger.log("   ...archived successfully.")
-
-        # --- Step 3: Fetch Static Context AND Yesterday's "Company Overview Card" ---
-        logger.log("3. Fetching Static Context & Yesterday's 'Company Overview Card'...")
-        cursor.execute("SELECT * FROM stocks WHERE ticker = ?", (ticker_to_update,))
-        company_data = cursor.fetchone() # This is now a dict-like object
-        
-        previous_overview_card_dict = {} # Keep the dictionary version for comparison
-        static_context_dict = {}
-
+        logger.log("3. Fetching Historical Notes & Yesterday's EOD Card...");
+        cursor.execute("SELECT historical_level_notes, company_overview_card_json FROM stocks WHERE ticker = ?", (ticker_to_update,))
+        company_data = cursor.fetchone(); previous_overview_card_dict={}; historical_notes=""
         if company_data:
-            # Load the static context from the database
-            static_context_dict = {
-                "sector": company_data["sector"],
-                "companyDescription": company_data["company_description"],
-                "analystSentiment": company_data["analyst_target"],
-                "insiderActivity": company_data["insider_activity_summary"],
-                "historical_level_notes": company_data["historical_level_notes"],
-                "upcoming_catalysts": company_data["upcoming_catalysts"]
-            }
-            
-            # Load yesterday's "Company Overview Card" (the full 6-part JSON)
+            historical_notes = company_data["historical_level_notes"] or ""
             if company_data['company_overview_card_json']:
-                try:
-                    # Store as dictionary for comparison later
-                    previous_overview_card_dict = json.loads(company_data['company_overview_card_json']) 
-                    logger.log("   ...found yesterday's 'Company Overview Card'.")
-                except json.JSONDecodeError:
-                    logger.log(f"   ...Warning: Could not parse yesterday's card for {ticker_to_update}. AI will use default template.")
-                    previous_overview_card_dict = json.loads(DEFAULT_COMPANY_OVERVIEW_JSON.replace("TICKER", ticker_to_update))
-            else:
-                logger.log(f"   ...No prior 'Company Overview Card' found for {ticker_to_update}. AI will create a new one.")
-                previous_overview_card_dict = json.loads(DEFAULT_COMPANY_OVERVIEW_JSON.replace("TICKER", ticker_to_update))
+                try: previous_overview_card_dict = json.loads(company_data['company_overview_card_json']); logger.log("   ...found yesterday's EOD card.")
+                except: logger.log(f"   ...Warn: Parse fail yesterday's EOD card."); previous_overview_card_dict = json.loads(DEFAULT_COMPANY_OVERVIEW_JSON.replace("TICKER", ticker_to_update))
+            else: logger.log(f"   ...No prior EOD card. Creating new."); previous_overview_card_dict = json.loads(DEFAULT_COMPANY_OVERVIEW_JSON.replace("TICKER", ticker_to_update))
         else:
-            logger.log(f"   ...No static context found for {ticker_to_update}. AI will use default template.")
-            # We still need to run, so initialize a new card
+            logger.log(f"   ...No DB entry. Creating row.");
+            try: cursor.execute("INSERT OR IGNORE INTO stocks (ticker) VALUES (?)", (ticker_to_update,)); conn.commit(); logger.log(f"   ...Created row.")
+            except Exception as insert_err: logger.log(f"   ...Error creating row: {insert_err}"); return
             previous_overview_card_dict = json.loads(DEFAULT_COMPANY_OVERVIEW_JSON.replace("TICKER", ticker_to_update))
 
-
-        # --- Step 4: Build FINAL "Note Generator" Prompt (The "Brain") ---
-        logger.log("4. Building 'Note Generator' Prompt for Gemini AI...")
-        
-        # System persona for the "Note Update Engine"
+        logger.log("4. Building EOD Note Generator Prompt...");
         note_generator_system_prompt = (
-            "You are an expert market structure and participant motivation analyst. "
-            "You are the 'Database Manager' for a portfolio manager. "
-            "You will be given [Static Context] (the human-set fundamental/historical data), "
-            "[Yesterday's Company Overview Card] (the full 6-part 'living document' you wrote yesterday), "
-            "and [Today's New Price Action Summary].\n"
-            "Your task is to synthesize ALL THREE data sources to generate the NEW, UPDATED 'Company Overview Card' JSON for today. "
-            "Your output MUST be a single, valid JSON object."
+            "You are an expert market structure analyst focused ONLY on participant motivation at MAJOR levels. Maintain 'Company Overview Card' JSON. Get [Historical Notes], [Yesterday's Card], [Today's EOD Action]. Generate NEW EOD card JSON. Prioritize structure unless levels decisively broken. Append `keyAction`. Update plans. Preserve `fundamentalContext`, `sector`, `description`. Output ONLY valid JSON."
         )
+        prompt = f"""[Historical Notes for {ticker_to_update}]\n(MAJOR structural levels.)\n{historical_notes}\n\n[Yesterday's Company Overview Card for {ticker_to_update}]\n(Update dynamic parts based on Today's EOD Action relative to MAJOR levels. Preserve statics.)\n{json.dumps(previous_overview_card_dict, indent=2)}\n\n[Today's New Price Action Summary]\n(Objective 5-minute data for full day.)\n{new_raw_text}\n\n[Task for Today: {trade_date} (EOD)]\nGenerate NEW card JSON. Focus on MAJOR levels & update PLANS for TOMORROW.\n**CRITICAL:** 1. PRESERVE STATIC: Copy `fundamentalContext`, `sector`, `companyDescription`. 2. RESPECT MAJOR LEVELS: `majorSupport`/`majorResistance` READ-ONLY unless decisively broken (2-3 day confirm). 3. UPDATE `keyAction`: APPEND EOD action relative to MAJOR levels. 4. UPDATE PLANS: Update BOTH plans based on EOD `keyAction` at MAJOR levels for TOMORROW. 5. UPDATE OTHER DYNAMICS: Update other fields supporting plans/`keyAction`. Minor levels only in `keyAction`/`tradingRange`. 6. `confidence` Rationale: Base on plan clarity relative to MAJOR levels.\n[Output Format] ONLY single valid JSON object. No markdown."""
         
-        # --- FINAL PROMPT with ENHANCED ANTI-RECENCY BIAS instruction ---
-        prompt = f"""
-        [Static Context for {ticker_to_update}]
-        (This is the high-level, human-curated context. Use this to inform your analysis, especially historical_level_notes.)
-        {json.dumps(static_context_dict, indent=2)}
-
-        [Yesterday's Company Overview Card for {ticker_to_update}] 
-        (This is the full 6-part 'Company Overview Card' from yesterday. Update this based on today's action, but respect the established structure.) 
-        {json.dumps(previous_overview_card_dict, indent=2)}
-
-        [Today's New Price Action Summary]
-        (This is the new 5-minute data from the processor.)
-        {new_raw_text}
-
-        [Your Task for Today: {trade_date}]
-        Generate the NEW, UPDATED "Company Overview Card" JSON.
-        
-        **CRITICAL INSTRUCTIONS:**
-        1.  **PRESERVE STATIC FIELDS:** You *must* copy the `fundamentalContext` block from [Yesterday's Card] **UNCHANGED**. Also, use the [Static Context] data to populate `sector` and `companyDescription`.
-        2.  **RESPECT ESTABLISHED STRUCTURE & AVOID RECENCY BIAS:**
-            * **Bias:** Give significant weight to the `bias` from [Yesterday's Card]. Do NOT change the `bias` unless [Today's New Price Action] *decisively breaks and closes beyond* a key support/resistance level defined in yesterday's `biasStrategy.triggers` or `biasStrategy.riskZones`. Mere testing or temporary breaches are not sufficient to change the bias.
-            * **Support/Resistance:** Prioritize the major levels defined in `historical_level_notes` (Static Context) and yesterday's `support`/`resistance`. Acknowledge *new* minor levels formed today (like today's LOD/HOD or POC) in the `keyAction` or `tradingRange` description, but DO NOT replace major established levels in the main `support`/`resistance` fields unless today's action *clearly invalidates* them with a strong break and close beyond. Differentiate between minor intraday levels and major structural levels.
-            * **Pattern:** Do not change the `technicalStructure.pattern` based on one day unless it completes or clearly breaks the existing pattern described in [Yesterday's Card]. Consolidation is still consolidation.
-            * **Context is Key:** Interpret today's action within the context of the established `priceTrend` and `bias`. Consolidation near highs after an uptrend is typically BULLISH continuation (a pause), not bearish, unless key *support* fails decisively. Consolidation near lows after a downtrend is typically BEARISH continuation unless key *resistance* breaks decisively.
-        3.  **UPDATE DYNAMIC FIELDS THOUGHTFULLY:** Update the other dynamic fields (`confidence`, `screener_briefing`, `basicContext`, `technicalStructure`, `behavioralSentiment`, `biasStrategy`, `sentimentSummary`) based on how [Today's New Price Action] *confirms, denies, or modifies* the established narrative from [Yesterday's Card] and the [Static Context], respecting Instruction #2.
-
-        **Detailed Update Logic:**
-        1.  **Update `basicContext`**: Set `tickerDate`. Update `priceTrend` and `recentCatalyst` reflecting today's action *within the context of the prior trend*.
-        2.  **Update `technicalStructure`**: Update `tradingRange`, `pattern`, `keyAction`, `volumeMomentum`. Update `support` and `resistance` cautiously, respecting Instruction #2. Note minor levels formed today but preserve major ones unless invalidated.
-        3.  **Update `behavioralSentiment`**: How does today's `keyAction` confirm or change the `buyerVsSeller` psychology *given the established context*?
-        4.  **Update `biasStrategy`**: Recalculate `bias`, `triggers`, and `riskZones` for tomorrow, respecting Instruction #2. The bias should generally remain unchanged unless a major level broke.
-        5.  **Calculate `confidence` (Top Level)**: (String) Provide rationale. Confidence relates to how well today's action fit the expected narrative based on established bias/levels.
-            - "High - [Rationale]": Today's action *strongly confirmed* the established bias and respected key levels AND aligns with context.
-            - "Medium - [Rationale]": Today's action was mixed/indecisive, OR didn't violate the bias but context offers weak alignment.
-            - "Low - [Rationale]": Today's action *decisively contradicted* the established bias (broke key levels) OR goes against strong context.
-        6.  **Write `screener_briefing` (Top Level)**: Single sentence for the screener reflecting the most actionable element *based on the potentially updated bias and key levels for tomorrow*.
-        7.  **Update `sentimentSummary`**: Write new summary lines reflecting the updated analysis and *its continuity or change from yesterday*.
-
-        [Output Format Constraint]
-        Output ONLY the single, complete, updated JSON object. Ensure it is valid JSON. Do not include ```json markdown.
-        """
-
-        # --- Step 5: Ask AI ---
-        key_index = API_KEYS.index(api_key_to_use) if api_key_to_use in API_KEYS else -1
-        logger.log(f"5. Calling Gemini AI using key #{key_index + 1}...")
-        
+        logger.log(f"5. Calling EOD AI Analyst...");
         ai_response_text = call_gemini_api(prompt, api_key_to_use, note_generator_system_prompt, logger)
+        if not ai_response_text: logger.log("Error: No AI response."); return
         
-        if not ai_response_text:
-            logger.log("Error: No response from AI. Aborting update.")
-            return
-
-        # --- Step 6: Analyze (Parse AI's JSON Response) ---
-        logger.log("6. Received new 'Company Overview Card' JSON from AI. Parsing...") 
-        
-        # Clean the response (remove markdown ```json ... ``` tags)
-        json_match = re.search(r"```json\s*([\s\S]+?)\s*```", ai_response_text)
-        if json_match:
-            ai_response_text = json_match.group(1)
-            
-        ai_response_text = ai_response_text.strip()
-        new_overview_card_dict = None # This will be the new dictionary
-
+        logger.log("6. Received EOD Card JSON. Parsing & Comparing...");
+        json_match = re.search(r"```json\s*([\s\S]+?)\s*```", ai_response_text); ai_response_text = json_match.group(1) if json_match else ai_response_text.strip()
+        new_overview_card_dict = None
         try:
             full_parsed_json = json.loads(ai_response_text)
-            
-            if isinstance(full_parsed_json, list) and len(full_parsed_json) > 0:
-                new_overview_card_dict = full_parsed_json[0]
-                logger.log("   ...AI returned a list. Extracted first object.")
-            elif isinstance(full_parsed_json, dict):
-                new_overview_card_dict = full_parsed_json
-            else:
-                raise json.JSONDecodeError("Parsed JSON is not a dictionary or a non-empty list.", ai_response_text, 0)
-
-        except json.JSONDecodeError as e:
-            logger.log(f"Error: AI response was not valid JSON. Aborting update. Error: {e}\nResponse:\n{ai_response_text}")
-            return
-
-        # Validate the new JSON
-        required_keys = ['marketNote', 'confidence', 'screener_briefing', 'basicContext', 'technicalStructure', 'fundamentalContext', 'behavioralSentiment', 'biasStrategy', 'sentimentSummary']
-        if not all(key in new_overview_card_dict for key in required_keys):
-            logger.log(f"Error: AI response is missing required keys from the 6-part card. Aborting update. Response: {json.dumps(new_overview_card_dict, indent=2)}")
-            return
-            
-        logger.log("   ...JSON parsed and validated successfully.")
+            if isinstance(full_parsed_json, list) and full_parsed_json: new_overview_card_dict = full_parsed_json[0]
+            elif isinstance(full_parsed_json, dict): new_overview_card_dict = full_parsed_json
+            else: raise json.JSONDecodeError("Not dict/list.", ai_response_text, 0)
+        except Exception as e: logger.log(f"Invalid JSON: {e}\n{ai_response_text}"); return
         
-        # --- Log the specific changes ---
-        logger.log("   ...Comparing yesterday's card to today's AI-generated card:")
-        try:
-            diff = DeepDiff(previous_overview_card_dict, new_overview_card_dict, ignore_order=True, report_repetition=True, view='tree')
-            
-            if not diff:
-                logger.log("   ...No changes detected between yesterday's card and today's AI output.")
+        required_keys=['marketNote','confidence','screener_briefing','basicContext','technicalStructure','fundamentalContext','behavioralSentiment','openingTradePlan','alternativePlan']
+        required_plan=['planName','knownParticipant','expectedParticipant','trigger','invalidation']; required_alt=required_plan+['scenario']
+        missing_keys=[k for k in required_keys if k not in new_overview_card_dict]
+        opening_plan_dict=new_overview_card_dict.get('openingTradePlan',{}); alt_plan_dict=new_overview_card_dict.get('alternativePlan',{})
+        missing_open=[k for k in required_plan if k not in opening_plan_dict]
+        missing_alt=[k for k in required_alt if k not in alt_plan_dict]
+        if missing_keys or missing_open or missing_alt: logger.log(f"Missing keys: T({missing_keys}), O({missing_open}), A({missing_alt}). Abort.\n{json.dumps(new_overview_card_dict, indent=2)}"); return
+        
+        logger.log("   ...JSON parsed & validated.")
+        try: # DeepDiff
+            diff=DeepDiff(previous_overview_card_dict, new_overview_card_dict, ignore_order=True, view='tree')
+            if not diff: logger.log("   ...No changes.")
             else:
-                changes_log = "   **Changes detected:**\n"
-                
-                # Check for changed values
+                changes_log="   **Changes detected:**\n"; changes_found=False
                 if 'values_changed' in diff:
-                    changes_log += "| Field Path | Old Value | New Value |\n"
-                    changes_log += "|---|---|---|\n"
+                    changes_log+="| Field | Old | New |\n|---|---|---|\n"; changes_found=True
                     for change in diff['values_changed']:
-                        path_str = change.path(output_format='list') # Get path as list
-                        # Format path nicely (e.g., root['biasStrategy']['bias'] -> biasStrategy.bias)
-                        formatted_path = '.'.join(str(p).replace('[', '.').replace(']', '').replace("'", "") for p in path_str)
-                        old_val = change.t1
-                        new_val = change.t2
-                        # Handle potential long strings or lists/dicts in values for display
-                        old_val_str = json.dumps(old_val) if isinstance(old_val, (dict, list)) else str(old_val)
-                        new_val_str = json.dumps(new_val) if isinstance(new_val, (dict, list)) else str(new_val)
-                        # Truncate long values for readability in the log table
-                        old_val_str = (old_val_str[:50] + '...') if len(old_val_str) > 53 else old_val_str
-                        new_val_str = (new_val_str[:50] + '...') if len(new_val_str) > 53 else new_val_str
-                        
-                        changes_log += f"| `{formatted_path}` | `{old_val_str}` | `{new_val_str}` |\n"
-                
-                # Optionally log added/removed items if needed (simpler format)
-                if 'dictionary_item_added' in diff:
-                     changes_log += "\n   **Fields Added:** " + ", ".join([item.path(output_format='str') for item in diff['dictionary_item_added']]) + "\n"
-                if 'dictionary_item_removed' in diff:
-                     changes_log += "\n   **Fields Removed:** " + ", ".join([item.path(output_format='str') for item in diff['dictionary_item_removed']]) + "\n"
-                # Add handling for other diff types like 'iterable_item_added/removed' if necessary
-
-                logger.log(changes_log)
-
-        except Exception as diff_e:
-            logger.log(f"   ...Error comparing JSONs with DeepDiff: {diff_e}. Falling back to basic log.")
-            # Fallback log
-            logger.log(f"   ...AI Confidence: `{new_overview_card_dict.get('confidence', 'N/A')}`")
-            summary = new_overview_card_dict.get('screener_briefing', 'N/A')
-            logger.log(f"   ...AI Screener Briefing: `{summary}`")
-
-        # --- Step 7: Update (stocks table) ---
-        logger.log("7. Saving the NEW 'Company Overview Card' to database...") 
-        today_str = date.today().isoformat()
+                        path=change.path().replace("root","").replace("['",".").replace("']","").strip('.'); path=path or"(root)"
+                        old=change.t1; new=change.t2; old_s=json.dumps(old,ensure_ascii=False) if isinstance(old,(dict,list)) else str(old); new_s=json.dumps(new,ensure_ascii=False) if isinstance(new,(dict,list)) else str(new)
+                        old_s=(old_s[:50]+'...') if len(old_s)>53 else old_s; new_s=(new_s[:50]+'...') if len(new_s)>53 else new_s
+                        changes_log+=f"| `{path}` | `{old_s}` | `{new_s}` |\n"
+                if not changes_found and ('dictionary_item_added' in diff or 'dictionary_item_removed' in diff): changes_log+="   ...Structural changes only.\n"
+                elif changes_found: logger.log(changes_log)
+        except Exception as e: logger.log(f"   ...Error comparing: {e}.")
         
-        # Convert the *validated* object back to a string for saving
-        new_overview_card_json_string = json.dumps(new_overview_card_dict, indent=2)
+        logger.log(f"   ...AI Confidence: `{new_overview_card_dict.get('confidence','N/A')}`")
+        logger.log(f"   ...AI Briefing: `{new_overview_card_dict.get('screener_briefing','N/A')}`")
+        logger.log(f"   ...AI Plan: `{new_overview_card_dict.get('openingTradePlan',{}).get('planName','N/A')}`")
         
-        # This query *only* updates the "Company Overview Card" and metadata 
-        cursor.execute("""
-            UPDATE stocks 
-            SET 
-                company_overview_card_json = ?,
-                last_updated = ?
-            WHERE 
-                ticker = ?
-        """, (new_overview_card_json_string, today_str, ticker_to_update))
-        
-        # Check if the update worked (in case it was a new ticker)
-        if cursor.rowcount == 0:
-             logger.log(f"   ...Ticker `{ticker_to_update}` not found in 'stocks' table. It must be initialized in the 'Static Context Editor' first.")
-             # Note: We still archived the data, but we can't update the overview card. 
-        else:
-            conn.commit()
-            logger.log(f"--- Successfully updated `{ticker_to_update}` for {today_str} ---")
-
-    except sqlite3.Error as e:
-        logger.log(f"An SQLite error occurred: `{e}`. Check if 'database_setup.py' was run.")
-    except Exception as e:
-        logger.log(f"An unexpected error occurred: `{e}`")
+        logger.log("7. Saving NEW EOD Card..."); today_str=date.today().isoformat()
+        new_json_str=json.dumps(new_overview_card_dict, indent=2)
+        cursor.execute("UPDATE stocks SET company_overview_card_json=?, last_updated=? WHERE ticker=?", (new_json_str, today_str, ticker_to_update))
+        if cursor.rowcount==0: logger.log(f"   ...Warn: Update fail {ticker_to_update} (row 0). Init first.")
+        else: conn.commit(); logger.log(f"--- Success EOD update {ticker_to_update} ---")
+    except Exception as e: logger.log(f"Unexpected error in EOD update: `{e}`")
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
-# --- 4. Workflow #2: The Screener Engine (FINAL "Single Document" Version) ---
-def run_screener(market_condition: str, confidence_filter: str, api_key_to_use: str, logger: AppLogger):
+# ---
+# --- Capital.com Authentication & Data Functions (Imported from Tester) ---
+# ---
+
+@st.cache_resource(ttl=1800) # Cache session for 30 minutes
+def create_capital_session(_logger: AppLogger): # Logger marked to be ignored by cache
     """
-    This screener is CORRECTED. It programmatically filters by confidence,
-    then passes the ENTIRE 6-part JSON card for each finalist to the AI.
+    Creates a new session with Capital.com using st.secrets.
+    Caches the session tokens.
     """
-    logger.log("--- Starting FINAL Trade Screener Engine ---")
-    conn = None
+    _logger.log("Attempting to create new Capital.com session...")
+    capital_com_secrets = st.secrets.get("capital_com", {})
+    api_key = capital_com_secrets.get("X_CAP_API_KEY")
+    identifier = capital_com_secrets.get("identifier")
+    password = capital_com_secrets.get("password")
+
+    if not all([api_key, identifier, password]):
+        _logger.log("<span style='color:red;'>Error: Capital.com secrets not found.</span>")
+        _logger.log("Add `[capital_com]` section to `.streamlit/secrets.toml`")
+        return None, None, None
+    
+    session_url = "https://api-capital.backend-capital.com/api/v1/session"
+    headers = {'X-CAP-API-KEY': api_key, 'Content-Type': 'application/json'}
+    payload = {"identifier": identifier, "password": password}
+    
     try:
-        conn = sqlite3.connect(DATABASE_FILE)
-        cursor = conn.cursor()
-
-        # Step 1: Filter/Compile List - Programmatically extract data
+        response = requests.post(session_url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        cst_token = response.headers.get('CST')
+        security_token = response.headers.get('X-SECURITY-TOKEN')
+        data = response.json(); account_info = data.get('accountInfo', {});
+        balance = account_info.get('balance'); account_id = data.get('accountId')
         
-        # This query gets the FULL "Company Overview Card" JSON 
-        # for all stocks that match the confidence filter.
-        query = """
-            SELECT 
-                ticker, 
-                company_overview_card_json
-            FROM stocks 
-            WHERE company_overview_card_json IS NOT NULL 
-              AND company_overview_card_json != '' 
-              AND json_valid(company_overview_card_json) -- Ensure JSON is valid before trying to extract
-        """
-        params = []
-        
-        if confidence_filter != "All":
-            # Filter by the new top-level 'confidence' field
-            # Use LIKE to match "High - [Rationale]"
-            query += " AND json_extract(company_overview_card_json, '$.confidence') LIKE ?"
-            params.append(f"{confidence_filter}%")
-            
-        cursor.execute(query, params)
-        # List of (ticker, full_json_string) tuples
-        candidate_rows = cursor.fetchall() 
-
-        if not candidate_rows:
-            logger.log(f"Error: No valid 'Company Overview Cards' found matching filter '{confidence_filter}'.")
-            return "No candidates found matching your filter."
-        
-        logger.log(f"1. Found {len(candidate_rows)} candidates matching filter '{confidence_filter}'.")
-
-        # Step 2: Build FINAL "Smarter Ranking" Prompt
-        logger.log("2. Building 'Smarter Ranking' Prompt for Gemini AI...")
-        
-        # --- Prompt asks for rationale for EACH ---
-        screener_system_prompt = (
-            "You are an expert market structure analyst focused ONLY on participant motivation (trapped/committed). "
-            "You will be given the 'Overall Market Condition' and a list of 'Candidate Stocks', each with its FULL 'Company Overview Card' (a 6-part JSON). " 
-            "Your job is to read the *entire card* for each candidate to understand its full context (fundamentals, technicals, bias). "
-            "Then, rank them from 1 (best) down, based ONLY on the clarity of the participant imbalance and alignment with the Market Condition. "
-            "The #1 setup must offer the highest probability edge for an opening trade tomorrow. "
-            "For EACH candidate in your ranked list, provide a 1-line concise rationale focusing on *who* is motivated/trapped. " 
-            "Output ONLY the ranked list as plain text (e.g., '1. TICKER: Rationale...\\n2. TICKER: Rationale...')." 
-        )
-        
-        # We are sending the FULL JSON card for each candidate.
-        candidate_list_text = ""
-        valid_candidates_count = 0
-        for ticker, full_json_string in candidate_rows:
-            try:
-                # Try parsing to ensure it's valid before sending
-                parsed_json = json.loads(full_json_string)
-                formatted_json = json.dumps(parsed_json, indent=2)
-                
-                candidate_list_text += f"\n--- Candidate: {ticker} ---\n"
-                candidate_list_text += formatted_json
-                candidate_list_text += f"\n--- End Candidate: {ticker} ---\n"
-                valid_candidates_count += 1
-            except json.JSONDecodeError:
-                logger.log(f"   ...Skipping candidate {ticker} due to invalid JSON in database.")
-                continue # Skip this candidate
-
-        if valid_candidates_count == 0:
-             logger.log(f"Error: Although rows were found, none contained valid JSON for the screener.")
-             return "No valid candidate data found for screener."
-
-        logger.log(f"   ...Sending {valid_candidates_count} valid candidates to the AI.")
-
-        # --- UPDATED ACTION IN PROMPT ---
-        prompt = f"""
-        [Data]
-        - **Overall Market Condition:** "{market_condition}"
-        - **Candidate Stocks (Full JSON "Company Overview Cards"):** {candidate_list_text}
-
-        [Action]
-        Provide the ranked list (plain text), starting with #1. Include a 1-line rationale for EACH stock. 
-        """
-        
-        # --- Step 3: Ask AI ---
-        key_index = API_KEYS.index(api_key_to_use) if api_key_to_use in API_KEYS else -1
-        logger.log(f"3. Calling Gemini AI using key #{key_index + 1}...")
-        
-        ranked_list_text = call_gemini_api(prompt, api_key_to_use, screener_system_prompt, logger)
-        
-        if not ranked_list_text:
-            logger.log("Error: No response from AI. Aborting screener.")
-            return "AI failed to return a ranked list."
-
-        logger.log("4. Received ranked list from AI.")
-        logger.log("--- SCREENER COMPLETE ---")
-        # Format the output slightly better for display if it's just plain text lines
-        # Assuming AI returns lines like "1. TICKER: Rationale"
-        formatted_ranked_list = ranked_list_text.replace('\n', '\n\n') # Add double newline for markdown
-        return formatted_ranked_list
-
-
-    except sqlite3.Error as e:
-        # Check for specific JSON errors if possible
-        if "malformed JSON" in str(e):
-             logger.log(f"An SQLite JSON error occurred: {e}. Check the data in 'Company Overview Card Editor' for invalid JSON.")
+        if cst_token and security_token:
+            _logger.log(f"<span style='color:green;'>Capital.com session created. (Balance: ${balance})</span>")
+            return cst_token, security_token, balance
         else:
-            logger.log(f"An SQLite error occurred: {e}. Check if 'database_setup.py' was run.")
-        return f"Database Error: {e}"
+            _logger.log(f"Session failed: Tokens missing. Headers: {response.headers}"); return None, None, None
+    except requests.exceptions.HTTPError as e:
+        _logger.log(f"<span style='color:red;'>Session failed (HTTP Error): {e.response.status_code}</span>")
+        try: _logger.log_code(e.response.json())
+        except: _logger.log_code(e.response.text, 'text')
+        return None, None, None
     except Exception as e:
-        logger.log(f"An unexpected error occurred: {e}")
-        return f"Unexpected Error: {e}"
+        _logger.log(f"<span style='color:red;'>Session failed (Error): {e}</span>"); return None, None, None
+
+def get_capital_current_price(epic: str, cst: str, xst: str, logger: AppLogger):
+    """Gets the live bid/offer for a single epic."""
+    url = f"https://api-capital.backend-capital.com/api/v1/markets/{epic}"
+    headers = {'X-SECURITY-TOKEN': xst, 'CST': cst}
+    try:
+        response = requests.get(url, headers=headers, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        snapshot = data.get('snapshot')
+        if snapshot and 'bid' in snapshot and 'offer' in snapshot:
+            return snapshot['bid'], snapshot['offer']
+        else:
+            logger.log(f"   ...Warn ({epic}): Live price not in snapshot. {data}")
+            return None, None
+    except Exception as e:
+        if hasattr(e, 'response') and e.response.status_code == 404:
+            logger.log(f"   ...Warn ({epic}): Market not found (404). Check EPIC name.")
+        else:
+            logger.log(f"   ...Error fetching live price for {epic}: {e}")
+        return None, None
+
+def get_capital_price_bars(epic: str, cst: str, xst: str, resolution: str, logger: AppLogger) -> pd.DataFrame | None:
+    """
+    Fetches price bars for a given resolution, filtering for today's pre-market.
+    """
+    end_date = datetime.utcnow()
+    start_date = end_date - timedelta(hours=16) # Fetch last 16 hours
+    
+    price_params = {"resolution": resolution, 'max': 1000, 'from': start_date.strftime('%Y-%m-%dT%H:%M:%S'), 'to': end_date.strftime('%Y-%m-%dT%H:%M:%S')}
+    headers = {'X-SECURITY-TOKEN': xst, 'CST': cst}
+    price_history_url = f"https://api-capital.backend-capital.com/api/v1/prices/{epic}"
+    
+    try:
+        response = requests.get(price_history_url, headers=headers, params=price_params, timeout=10)
+        response.raise_for_status()
+        price_data = response.json()
+        prices = price_data.get('prices', [])
+        if not prices:
+            logger.log(f"   ...No price bars returned for {epic} (resolution: {resolution}).")
+            return None
+            
+        data = {
+            'SnapshotTime': [p.get('snapshotTime') for p in prices],
+            'Open': [p.get('openPrice', {}).get('bid') for p in prices],
+            'High': [p.get('highPrice', {}).get('bid') for p in prices],
+            'Low': [p.get('lowPrice', {}).get('bid') for p in prices],
+            'Close': [p.get('closePrice', {}).get('bid') for p in prices],
+            'Volume': [p.get('lastTradedVolume') for p in prices]
+        }
+        df = pd.DataFrame(data)
+        df['SnapshotTime'] = pd.to_datetime(df['SnapshotTime'], errors='coerce', utc=True)
+        df.dropna(subset=['SnapshotTime', 'Close', 'Open', 'High', 'Low', 'Volume'], inplace=True)
+        
+        if df.empty:
+            logger.log(f"   ...Price bars for {epic} were empty after cleaning.")
+            return None
+        
+        # Filter to *today's* pre-market (4:00 - 9:30 ET)
+        df['ET_Time'] = df['SnapshotTime'].dt.tz_convert(US_EASTERN)
+        today_et = datetime.now(US_EASTERN).date()
+        pm_start = US_EASTERN.localize(datetime(today_et.year, today_et.month, today_et.day, PREMARKET_START_HOUR, 0))
+        pm_end = US_EASTERN.localize(datetime(today_et.year, today_et.month, today_et.day, PREMARKET_END_HOUR, PREMARKET_END_MINUTE))
+        
+        df_premarket = df[(df['ET_Time'] >= pm_start) & (df['ET_Time'] < pm_end)].copy()
+        
+        if df_premarket.empty:
+            logger.log(f"   ...No bars found for {epic} within today's pre-market window ({pm_start.strftime('%Y-%m-%d %H:%M')} to {pm_end.strftime('%H:%M')}).")
+            return pd.DataFrame() # Return EMPTY dataframe instead of None
+            
+        logger.log(f"   ...Successfully extracted {len(df_premarket)} pre-market bars for {epic}.")
+        return df_premarket
+
+    except Exception as e:
+        logger.log(f"   ...Error fetching/processing price bars for {epic}: {e}")
+        return None
+
+# --- NEW: Pre-Market Processor ---
+def process_premarket_bars_to_summary(ticker: str, df_pm: pd.DataFrame, live_price: float, logger: AppLogger) -> str:
+    """
+    Analyzes the 5-min pre-market DataFrame and creates a detailed text summary
+    in the same format as the EOD Processor.
+    """
+    logger.log(f"   ...Processing {len(df_pm)} pre-market bars for {ticker}...")
+    try:
+        if df_pm.empty:
+            return f"Pre-Market Story: {ticker} | {date.today().isoformat()} (No pre-market bars found. Current price is ${live_price:.2f})"
+
+        pm_open = df_pm['Open'].iloc[0]
+        pm_high = df_pm['High'].max()
+        pm_low = df_pm['Low'].min()
+        pm_close = live_price # Use the live price as the "current close"
+        total_volume = df_pm['Volume'].sum()
+        
+        if total_volume > 0:
+            pm_vwap = (df_pm['Close'] * df_pm['Volume']).sum() / total_volume
+        else:
+            pm_vwap = pm_close
+        
+        pm_poc = pm_close; pm_val = pm_low; pm_vah = pm_high
+        
+        if not df_pm.empty and total_volume > 0 and len(df_pm) > 1:
+            try:
+                unique_prices = df_pm['Close'].nunique()
+                bins_calc = min(20, unique_prices - 1 if unique_prices > 1 else 1)
+                
+                if bins_calc > 0:
+                    price_bins = pd.cut(df_pm['Close'], bins=bins_calc)
+                    volume_by_price = df_pm.groupby(price_bins)['Volume'].sum()
+                    if not volume_by_price.empty:
+                        poc_range = volume_by_price.idxmax()
+                        pm_poc = poc_range.mid
+                        target_volume = total_volume * 0.7
+                        poc_bin_index = volume_by_price.index.get_loc(poc_range)
+                        current_volume = volume_by_price.iloc[poc_bin_index]
+                        pm_val_bin_index, pm_vah_bin_index = poc_bin_index, poc_bin_index
+
+                        while current_volume < target_volume and (pm_val_bin_index > 0 or pm_vah_bin_index < len(volume_by_price) - 1):
+                            next_up_index = pm_vah_bin_index + 1
+                            next_down_index = pm_val_bin_index - 1
+                            vol_up = volume_by_price.iloc[next_up_index] if next_up_index < len(volume_by_price) else 0
+                            vol_down = volume_by_price.iloc[next_down_index] if next_down_index >= 0 else 0
+                            if vol_up == 0 and vol_down == 0: break
+                            if vol_up > vol_down:
+                                current_volume += vol_up; pm_vah_bin_index = next_up_index
+                            else:
+                                current_volume += vol_down; pm_val_bin_index = next_down_index
+                        
+                        pm_val = volume_by_price.index[pm_val_bin_index].left
+                        pm_vah = volume_by_price.index[pm_vah_bin_index].right
+            except Exception as e:
+                 logger.log(f"      ...Warn: Could not calculate POC/VAH for {ticker}: {e}")
+        
+        trend_desc = "Consolidating."
+        price_range = pm_high - pm_low
+        if price_range > 0.001: 
+            percent_of_range = (pm_close - pm_low) / price_range
+            if percent_of_range > 0.7: trend_desc = "Trending higher near PMH."
+            elif percent_of_range < 0.3: trend_desc = "Trending lower near PML."
+        
+        summary_text = f"""
+        Pre-Market Story: {ticker} | {date.today().isoformat()}
+        Open (PM): ${pm_open:.2f}
+        High (PMH): ${pm_high:.2f}
+        Low (PML): ${pm_low:.2f}
+        Current Price: ${pm_close:.2f}
+        Session VWAP (PM): ${pm_vwap:.2f}
+        Value Area (PM): ${pm_val:.2f} - ${pm_vah:.2f}
+        Point of Control (POC) (PM): ${pm_poc:.2f}
+        Total Volume (PM): {total_volume}
+        Key Action: Price opened PM at ${pm_open:.2f}, set a range between ${pm_low:.2f} and ${pm_high:.2f}. {trend_desc} Currently trading at ${pm_close:.2f} ({'above' if pm_close > pm_vwap else 'below'} PM VWAP).
+        """
+        return re.sub(r'\s+', ' ', summary_text).strip()
+    
+    except Exception as e:
+        logger.log(f"   ...Error in process_premarket_bars_to_summary for {ticker}: {e}")
+        return f"Pre-Market Summary: {ticker} | {date.today().isoformat()} (Live Price: ${live_price:.2f}. Error processing bars.)"
+
+
+# --- Workflow 2a - Generate Pre-Market Tactical Cards (REWRITTEN for Capital.com) ---
+def generate_premarket_tactical_cards(selected_tickers: list, overnight_news: str, logger: AppLogger, cst: str, xst: str):
+    logger.log("--- Starting Workflow 2a: Generate Pre-Market Tactical Cards ---")
+    premarket_cards_output = {}
+    if not selected_tickers: logger.log("No tickers selected."); return False
+
+    try:
+        conn = sqlite3.connect(DATABASE_FILE); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+        
+        logger.log(f"Fetching EOD cards for {len(selected_tickers)} selected tickers...")
+        placeholders = ','.join('?' * len(selected_tickers))
+        cursor.execute(f"SELECT ticker, historical_level_notes, company_overview_card_json FROM stocks WHERE ticker IN ({placeholders}) AND company_overview_card_json IS NOT NULL AND company_overview_card_json != '' AND json_valid(company_overview_card_json)", selected_tickers)
+        eod_card_rows = cursor.fetchall()
+        
+        eod_cards_map = {row['ticker']: (row['historical_level_notes'] or "", row['company_overview_card_json']) for row in eod_card_rows}
+        
+        if len(eod_card_rows) != len(selected_tickers):
+             found_tickers = eod_cards_map.keys()
+             missing = [t for t in selected_tickers if t not in found_tickers]
+             logger.log(f"Warn: No valid EOD cards for: {', '.join(missing)}.")
+             if not eod_card_rows: logger.log("Error: No EOD cards found."); return False
+        
+        logger.log("Fetching Capital.com data (Live Price & 5-min Bars)...")
+        live_prices = {}
+        bar_dataframes = {}
+        
+        for i, ticker in enumerate(selected_tickers):
+             if ticker in eod_cards_map:
+                 bid, offer = get_capital_current_price(ticker, cst, xst, logger)
+                 if bid and offer:
+                     live_prices[ticker] = (bid + offer) / 2
+                 
+                 df_5m = get_capital_price_bars(ticker, cst, xst, "MINUTE_5", logger) # Use 5-min bars
+                 if df_5m is not None: # Can be empty DF, that's fine
+                     bar_dataframes[ticker] = df_5m
+                 
+                 if i < len(selected_tickers) - 1: time.sleep(0.33)
+
+        logger.log(f"   ...Live prices found for {len(live_prices)} / {len(selected_tickers)} tickers.")
+        logger.log(f"   ...5-min bars found for {len(bar_dataframes)} / {len(selected_tickers)} tickers.")
+
+        pre_market_synthesizer_system_prompt = (
+             "You are an expert market structure analyst creating a TACTICAL plan for the OPENING BELL. Focus ONLY on participant motivation at MAJOR levels from [Historical Notes]/[EOD Card]. You get [Historical Notes], [Yesterday's EOD Card], [Pre-Market Story], [Live Price/Gap], [Overnight News]. Generate NEW 'Pre-Market Tactical Card' JSON. ANALYZE GAP/STORY vs MAJOR LEVELS & UPDATE TRADE PLANS based on Acceptance vs Rejection. PRESERVE `fundamentalContext`, `sector`, `companyDescription`, `majorSupport`, `majorResistance`. UPDATE ALL OTHER dynamic fields (`confidence`, `screener_briefing`, `keyAction` [APPEND pre-market story], etc.) to reflect pre-market reality. Prioritize current price/nearest major level for plans. Discard irrelevant EOD plans if gap is large. Output ONLY single, valid JSON."
+        )
+
+        processed_count = 0
+        logger.log(f"Starting AI synthesis loop for {len(eod_card_rows)} tickers with EOD cards...")
+        for i, row in enumerate(eod_card_rows):
+            ticker = row['ticker']
+            logger.log(f"\n--- Processing Ticker: {ticker} ---")
+            historical_notes_pm = row['historical_level_notes'] or ""
+            eod_card_json_str = row['company_overview_card_json']
+            try:
+                eod_card_dict = json.loads(eod_card_json_str)
+                logger.log("**Base EOD Card (Input):**"); logger.log_code(eod_card_dict)
+            except Exception as e: logger.log(f"   ...Skip {ticker}: Invalid EOD JSON. Err: {e}"); continue
+
+            # --- *** STOP CONDITION (Per Ticker) *** ---
+            live_price = live_prices.get(ticker)
+            df_pm = bar_dataframes.get(ticker) # Can be None if fetch failed, or Empty if no PM bars found
+
+            if not live_price or df_pm is None: # Critical fail if NO live price OR bar fetch FAILED (None)
+                 logger.log(f"   ...**STOPPING AI Call for {ticker}: Missing Live Price or 5-min Bar Data Fetch Failed.**")
+                 logger.log(f"      (Live Price found: {bool(live_price)}, Bar Data fetch status: {'Success (Empty)' if isinstance(df_pm, pd.DataFrame) else 'Failed (None)'})")
+                 continue
+
+            # --- Process data and build prompt (df_pm can be empty, that's OK) ---
+            logger.log(f"**Processing {len(df_pm)} 5-min bars for Pre-Market Story...**")
+            pre_market_story_text = process_premarket_bars_to_summary(ticker, df_pm, live_price, logger) # Pass live_price
+            logger.log("**Generated Pre-Market Story (Input):**")
+            logger.log_code(pre_market_story_text, 'text')
+            
+            live_price_for_prompt = f"~${live_price:.2f}"
+            time_str = datetime.now(US_EASTERN).strftime('%Y-%m-%d %H:%M:%S %Z')
+            pre_market_context_str = f"Current Price: {live_price_for_prompt} (@ {time_str})."
+            try: # Calculate gap
+                 basic_context=eod_card_dict.get("basicContext",{}); price_trend=basic_context.get("priceTrend","")
+                 y_close_str = str(price_trend).split("|")[0].replace("~","").replace("$","").strip()
+                 if y_close_str: y_close=float(y_close_str); gap_pct=((live_price-y_close)/y_close)*100; pre_market_context_str += f" Gap: {gap_pct:+.2f}%."
+            except Exception as e: logger.log(f"      ...Warn: Error calculating gap: {e}")
+            logger.log(f"**Live Price / Gap String (Input):** `{pre_market_context_str}`")
+            logger.log(f"**Overnight News (Input):** `{overnight_news or 'N/A'}`")
+
+            prompt = f"""
+            [Historical Notes for {ticker}]
+            (MAJOR structural levels)
+            {historical_notes_pm}
+
+            [Yesterday's EOD Card for {ticker}]
+            (Base JSON)
+            {json.dumps(eod_card_dict, indent=2)}
+
+            [Pre-Market Data / News for {ticker}]
+            - Live Price/Gap: {pre_market_context_str}
+            - Pre-Market Story (from 5-min bars): {pre_market_story_text}
+            - General News: {overnight_news or "N/A"}
+
+            [Task]
+            Generate NEW "Pre-Market Tactical Card" JSON for open ({date.today().isoformat()}).
+            FOCUS ON GAP & PRE-MARKET STORY vs MAJOR LEVELS. Update PLANS based on current price.
+            PRESERVE statics (`fundamentalContext`, `sector`, `companyDescription`, `majorSupport`, `majorResistance`).
+            UPDATE ALL OTHER dynamic fields (`confidence`, `screener_briefing`, `keyAction` [APPEND PM story], etc.) to reflect tactical situation.
+            
+            [Output Format Constraint]
+            Output ONLY single, valid JSON object. No ```json markdown.
+            """
+            logger.log("**Full Prompt Sent to Pre-Market AI:**"); logger.log_code(prompt, language='text')
+
+            key_to_use = random.choice(API_KEYS) # --- USE RANDOM KEY ---
+            logger.log(f"Calling Pre-Market AI (key #{API_KEYS.index(key_to_use)+1})...")
+            ai_response_text = call_gemini_api(prompt, key_to_use, pre_market_synthesizer_system_prompt, logger)
+
+            if ai_response_text:
+                logger.log("**Raw AI Response (Pre-Market):**"); logger.log_code(ai_response_text, language='text')
+                json_match = re.search(r"```json\s*([\s\S]+?)\s*```", ai_response_text); ai_response_text = json_match.group(1) if json_match else ai_response_text.strip()
+                try:
+                    premarket_card_dict = json.loads(ai_response_text)
+                    logger.log("**Parsed AI Response (Tactical Card):**"); logger.log_code(premarket_card_dict)
+                    
+                    if 'preMarketContext' not in premarket_card_dict: premarket_card_dict['preMarketContext'] = {}
+                    premarket_card_dict['preMarketContext']['livePrice'] = live_price_for_prompt
+                    premarket_card_dict['preMarketContext']['overnightNews'] = overnight_news or "N/A"
+                    ai_summary_for_ctx = premarket_card_dict.get('screener_briefing', "AI Summary missing")
+                    ai_key_action = premarket_card_dict.get('technicalStructure',{}).get('keyAction', "N/A")
+                    premarket_card_dict['preMarketContext']['tacticalSummary'] = f"Briefing: {ai_summary_for_ctx} | Recent Key Action: {ai_key_action}"
+
+                    # Re-Validate
+                    req_keys_pm=['marketNote','confidence','screener_briefing','basicContext','technicalStructure','fundamentalContext','behavioralSentiment','openingTradePlan','alternativePlan','preMarketContext']
+                    req_plan_pm=['planName','knownParticipant','expectedParticipant','trigger','invalidation']; req_alt_pm=req_plan_pm+['scenario']; req_pm_ctx=['livePrice','overnightNews','tacticalSummary']
+                    miss_keys_pm=[k for k in req_keys_pm if k not in premarket_card_dict]
+                    pm_open_plan = premarket_card_dict.get('openingTradePlan', {})
+                    pm_alt_plan = premarket_card_dict.get('alternativePlan', {})
+                    pm_ctx = premarket_card_dict.get('preMarketContext', {})
+                    miss_open_pm=[k for k in req_plan_pm if k not in pm_open_plan]
+                    miss_alt_pm=[k for k in req_alt_pm if k not in pm_alt_plan]
+                    miss_pm_ctx=[k for k in req_pm_ctx if k not in pm_ctx]
+
+                    if miss_keys_pm or miss_open_pm or miss_alt_pm or miss_pm_ctx:
+                         logger.log(f"      ...Error {ticker}: Validation Failed! Missing: T({miss_keys_pm}), O({miss_open_pm}), A({miss_alt_pm}), PM({miss_pm_ctx}).")
+                         logger.log("**Problematic Parsed PreMarket JSON:**"); logger.log_code(premarket_card_dict)
+                    else:
+                        premarket_cards_output[ticker] = premarket_card_dict
+                        processed_count += 1
+                        logger.log(f"      ...Success: Tactical card for {ticker} generated.")
+                except json.JSONDecodeError as e:
+                    logger.log(f"      ...Error {ticker}: AI response not valid JSON. Error: {e}")
+            else:
+                 logger.log(f"      ...Error {ticker}: No response from Pre-Market AI.")
+            if i < len(eod_card_rows) - 1: time.sleep(0.75) # Reduce delay slightly
+
+        st.session_state['premarket_cards'] = premarket_cards_output
+        logger.log(f"--- Workflow 2a Complete: Generated pre-market cards for {processed_count}/{len(eod_card_rows)} tickers ---")
+        return True
+
+    except Exception as e: logger.log(f"Unexpected error in generate_premarket_cards: {e}"); st.session_state['premarket_cards'] = {}; return False
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 
-# --- 5. Streamlit Application UI ---
+# --- Workflow #2b: The Screener Engine (Unchanged) ---
+def run_tactical_screener(market_condition: str, pre_market_cards: dict, api_key_to_use: str, logger: AppLogger):
+    # ... (This function remains identical, it just needs the pre_market_cards dict) ...
+    logger.log("--- Starting Workflow 2b: Final Tactical Screener Ranking ---")
+    if not pre_market_cards: logger.log("Error: No Pre-Market Cards provided."); return "Error: No pre-market cards."
+    logger.log(f"1. Preparing {len(pre_market_cards)} pre-market cards...");
+    logger.log("2. Building FINAL 'Smarter Ranking' Prompt...")
+    screener_system_prompt_final = ( # Prompt asking for detailed briefing
+            "You are an expert Head Trader using Efficient Market Hypothesis (EMH) for opening trades. Core philosophy: 'Acceptance vs. Rejection'.\n"
+            "**Core Philosophy:** PreMarket shows new 'fair value'. Trade is ACCEPTANCE (moves beyond) or REJECTION (fails/reverses). Gap TO major level = high-prob REJECTION.\n"
+            "**Reasoning:** 1. Read `preMarketContext`. 2. Compare `livePrice` to `majorSupport`/`Resistance` -> Accept/Reject? 3. Select matching plan (`opening` or `alternative`). 4. Rank by clarity of 'trap'. 5. Output 'Trade Briefing'.\n"
+            "**Output Format:** For EACH ranked stock:\n"
+            "### **[Rank]. [Ticker]**\n"
+            "- **Selected Plan:** [Name of ACTIVE plan]\n"
+            "- **Rationale (Acceptance vs. Rejection):** [Explain WHY: gap, level, trapped participants]\n"
+            "- **Full Plan Details:** [JSON object: trigger, invalidation, knownP, expectedP of selected plan]\n"
+            "- **Key Risk:** [Main risk invalidating plan]\n"
+            "Output ONLY the ranked list in structured Markdown."
+        )
+    candidate_list_text = ""; valid_count = 0
+    for ticker, card_dict in pre_market_cards.items():
+         if isinstance(card_dict, dict):
+             req_keys_scr = ['marketNote','confidence','preMarketContext','technicalStructure','openingTradePlan','alternativePlan']
+             if all(key in card_dict for key in req_keys_scr):
+                 candidate_list_text += f"\n--- Candidate: {ticker} ---\n{json.dumps(card_dict, indent=2)}\n--- End Candidate: {ticker} ---\n"; valid_count += 1
+             else: logger.log(f"   ...Skip {ticker}: Pre-market card invalid structure.")
+         else: logger.log(f"   ...Skip {ticker}: Invalid data type.")
+    if not candidate_list_text: logger.log("Error: No valid cards to send."); return "Error: No valid cards."
+    logger.log(f"   ...Sending {valid_count} candidates.")
+    prompt_final = f"""[Data]\n- **Overall Market Condition:** "{market_condition}"\n- **Candidate Stocks (Full JSON 'Pre-Market Tactical Cards'):**\n{candidate_list_text}\n\n[Action]\nProvide ranked list using 'Trade Briefing' Markdown format for EACH stock. Ensure 'Full Plan Details' is JSON."""
+    key = api_key_to_use; key_idx = API_KEYS.index(key) if key in API_KEYS else -1
+    logger.log(f"3. Calling Final Screener AI (key #{key_idx + 1})...");
+    ranked_list_details_text = call_gemini_api(prompt_final, key, screener_system_prompt_final, logger)
+    if not ranked_list_details_text: logger.log("Error: No response from Screener AI."); return "AI failed."
+    logger.log("4. Received detailed ranked list.");
+    logger.log("**Raw AI Response (Screener):**"); logger.log_code(ranked_list_details_text, language='markdown')
+    logger.log("--- FINAL SCREENER COMPLETE ---")
+    cleaned_list = re.sub(r"^\s*```[a-zA-Z]*\s*\n?|\n?\s*```\s*$", "", ranked_list_details_text).strip()
+    return cleaned_list
+
+
+# --- 5. Streamlit Application UI (5 Tabs) ---
 
 st.set_page_config(page_title="Analyst Pipeline Engine (FINAL)", layout="wide")
-st.title("Analyst Pipeline Engine (Single Company Overview Card)") 
+st.title("Analyst Pipeline Engine (Capital.com Pre-Market)") # Updated title
 
-# --- Helper Function to get all tickers ---
+# --- NEW: UI Validation Check for Gemini API Keys ---
+if not API_KEYS or not isinstance(API_KEYS, list) or len(API_KEYS) == 0:
+    st.error("Error: Gemini API keys not found in st.secrets.")
+    st.info("Please add your Gemini API keys to your `.streamlit/secrets.toml` file in a list format:")
+    st.code("""
+[gemini]
+api_keys = [
+    "AIzaSy...key1",
+    "AIzaSy...key2",
+]
+    """)
+    st.stop() # Stop the app if no keys are loaded
+else:
+    # This message can be removed if it's too noisy
+    # st.success(f"Successfully loaded {len(API_KEYS)} Gemini API keys from st.secrets.")
+    pass
+
+
+# --- Helper Functions (Unchanged) ---
 def get_all_tickers_from_db():
-    if not os.path.exists(DATABASE_FILE):
-        return []
-    conn = None
-    try:
-        conn = sqlite3.connect(DATABASE_FILE)
-        # Ensure we only get tickers, even if other data is null
-        df_tickers = pd.read_sql_query("SELECT DISTINCT ticker FROM stocks ORDER BY ticker ASC", conn)
-        return df_tickers['ticker'].tolist()
-    except Exception as e:
-        st.error(f"Error fetching tickers: {e}")
-        return []
+    if not os.path.exists(DATABASE_FILE): return []
+    conn=None; tickers=[]
+    try: conn=sqlite3.connect(DATABASE_FILE); tickers=pd.read_sql_query("SELECT DISTINCT ticker FROM stocks ORDER BY ticker ASC",conn)['ticker'].tolist()
+    except Exception as e: st.error(f"Err fetch tickers:{e}")
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
+    return tickers
 
-# --- Helper to safely parse JSON and extract a field ---
-def extract_json_field(json_string, field_path):
-    if not json_string or pd.isna(json_string):
-        return None
+def extract_json_field(json_string, field_path, default="N/A"):
+    if not json_string or pd.isna(json_string): return default
     try:
-        data = json.loads(json_string)
-        # Navigate the path (e.g., 'biasStrategy.bias')
-        keys = field_path.split('.')
-        value = data
-        for key in keys:
-            # Check if intermediate key exists and is a dictionary
-            if value is None or not isinstance(value, dict): 
-                return None # Path does not exist
-            value = value.get(key)
-        
-        # Join list-based summaries
-        if isinstance(value, list):
-            # Ensure all items are strings before joining
-            return " ".join(map(str, value)) 
-        # Safely convert non-string primitives to string
-        if value is not None and not isinstance(value, str):
-             return str(value)
-        return value
-    except (json.JSONDecodeError, TypeError, AttributeError): # Added AttributeError
-        return "JSON Err"
+        data=json.loads(json_string); keys=field_path.split('.'); value=data
+        for i, key in enumerate(keys):
+            if not isinstance(value, dict):
+                 if key.isdigit() and isinstance(value, list) and int(key) < len(value): value = value[int(key)]
+                 else: return default
+            else: value = value.get(key)
+            if value is None: return default
+        if isinstance(value, list): return " ".join(map(str, value)) or default
+        return str(value) if value is not None else default
+    except Exception: return "JSON Err"
 
-# --- Define Tabs ---
-tab_editor, tab_runner, tab_screener, tab_battle_card_viewer = st.tabs([ 
-    "Company Overview Card Editor", 
-    "Pipeline Runner (Daily)", 
-    "Trade Screener",
-    "Battle Card Viewer" 
+# --- Initialize session state ---
+if 'premarket_cards' not in st.session_state: st.session_state['premarket_cards'] = {}
+if 'last_selected_tickers' not in st.session_state: st.session_state['last_selected_tickers'] = []
+# Cache Capital.com session
+if 'capital_session' not in st.session_state: 
+    # Store string isoformat for session state safety
+    st.session_state['capital_session'] = {"cst": None, "xst": None, "time_utc_iso": None} 
+
+
+# --- Define 5 Tabs ---
+tab_editor, tab_runner_eod, tab_preflight, tab_viewer, tab_screener = st.tabs([
+    "Context & EOD Card Editor", # Combined Editor
+    "Pipeline Runner (EOD)",     # Workflow 1
+    "Pre-Flight Check",          # Workflow 2a
+    "Battle Card Viewer",        # Comparison Viewer
+    "Trade Screener (Tactical)"  # Workflow 2b
 ])
 
-# --- TAB 1: Company Overview Card Editor (FINAL - All-in-One) ---
+# --- TAB 1: Context & EOD Card Editor (Unchanged) ---
 with tab_editor:
-    st.header("Company Overview Card Editor (Your 'Human-in-the-Loop' View)")
-    st.caption("Use this tab to set TRULY STATIC context AND to review/edit the AI's 'Company Overview Card'.") 
-
-    if not os.path.exists(DATABASE_FILE):
-        st.error(f"Database file '{DATABASE_FILE}' not found. Run 'final_database_setup.py' first.")
+    st.header("Context & EOD Card Editor")
+    st.caption("Set `Historical Notes` & review/edit EOD Card.")
+    if not os.path.exists(DATABASE_FILE): st.error(f"DB not found.")
     else:
-        all_tickers = get_all_tickers_from_db()
-        
-        col1, col2 = st.columns([2,1])
-        with col1:
-            options = [""] + all_tickers
-            # Use session state to preserve selection across reruns
-            if 'selected_ticker_editor' not in st.session_state:
-                st.session_state['selected_ticker_editor'] = ""
-            selected_ticker = st.selectbox("Select Ticker to Edit:", options=options, key="selected_ticker_editor")
-        with col2:
-            new_ticker_input = st.text_input("Or Add New Ticker:", placeholder="e.g., MSFT", key="new_ticker_input_editor")
-            
-        ticker_to_edit = new_ticker_input.upper() if new_ticker_input else selected_ticker
-        
-        # Ensure only one is active
-        if new_ticker_input and selected_ticker:
-             st.warning("Please clear either 'Select Ticker' or 'Add New Ticker'.")
-             ticker_to_edit = "" # Prevent editing if both are set
-
-        if ticker_to_edit:
-            st.markdown("---")
-            st.subheader(f"Editing Context for: ${ticker_to_edit}")
-            
-            conn = None
+        all_tickers = get_all_tickers_from_db(); col1, col2 = st.columns([2,1])
+        with col1: options = [""] + all_tickers; selected_ticker = st.selectbox("Ticker:", options, key="selected_ticker_editor")
+        with col2: new_ticker = st.text_input("Or Add:", key="new_ticker_editor_text")
+        ticker_edit = new_ticker.upper() if new_ticker else selected_ticker
+        if new_ticker and selected_ticker: st.warning("Clear one."); ticker_edit = ""
+        if ticker_edit:
+            st.markdown("---"); st.subheader(f"Edit: ${ticker_edit}")
+            conn=None
             try:
-                conn = sqlite3.connect(DATABASE_FILE)
-                conn.row_factory = sqlite3.Row # Get dicts
-                cursor = conn.cursor()
-                
-                # Load existing data
-                cursor.execute("SELECT * FROM stocks WHERE ticker = ?", (ticker_to_edit,))
-                data = cursor.fetchone()
-                
-                # Set defaults for static context
-                default_static_data = {
-                    "company_description": "", "sector": "", "analyst_target": 0.0,
-                    "insider_activity_summary": "", "historical_level_notes": "", "upcoming_catalysts": ""
-                }
-                if data:
-                    default_static_data.update(dict(data))
-                
-                # Set default for the JSON company overview card 
-                default_json_text = DEFAULT_COMPANY_OVERVIEW_JSON.replace("TICKER", ticker_to_edit)
+                conn=sqlite3.connect(DATABASE_FILE); conn.row_factory=sqlite3.Row; cursor=conn.cursor()
+                cursor.execute("SELECT historical_level_notes, company_overview_card_json FROM stocks WHERE ticker=?", (ticker_edit,)); data=cursor.fetchone()
+                notes = data["historical_level_notes"] if data and data["historical_level_notes"] else ""
+                json_txt = DEFAULT_COMPANY_OVERVIEW_JSON.replace("TICKER", ticker_edit)
                 if data and data["company_overview_card_json"]:
                     try:
-                        # Attempt to pretty-print if valid JSON
-                        loaded_json = json.loads(data["company_overview_card_json"])
-                        default_json_text = json.dumps(loaded_json, indent=2)
-                    except json.JSONDecodeError:
-                         # Fallback to raw text if not valid JSON
-                        default_json_text = data["company_overview_card_json"] 
-
-                # --- Section 1: Static Context Editor (The Form) ---
-                with st.expander("Section 1: Static Context Editor (Your Long-Term Memory)", expanded=True): # Expand by default
-                    # Use unique keys based on the ticker to avoid state issues when switching tickers
-                    form_key = f"static_context_form_{ticker_to_edit}"
-                    with st.form(key=form_key):
-                        st.caption("Set the TRULY STATIC context here. The AI reads this but will not change it.")
-                        # --- FIX: Use value instead of default_value ---
-                        sector_val = st.text_input("Sector:", value=default_static_data["sector"], key=f"sector_{ticker_to_edit}")
-                        analyst_target_val = st.number_input("Analyst Target Price:", value=default_static_data["analyst_target"], key=f"analyst_target_{ticker_to_edit}", format="%.2f", step=0.01)
-                        company_description_val = st.text_area("Company Description:", value=default_static_data["company_description"], key=f"company_description_{ticker_to_edit}", height=100)
-                        insider_activity_val = st.text_area("Insider Activity Summary:", value=default_static_data["insider_activity_summary"], key=f"insider_activity_{ticker_to_edit}", height=100)
-                        historical_notes_val = st.text_area("Historical Level Notes (CRITICAL):", value=default_static_data["historical_level_notes"], key=f"historical_notes_{ticker_to_edit}", height=150,
-                                      help="e.g., 'Failed at $180 last month', 'Major support at $150'")
-                        catalysts_val = st.text_area("Upcoming Catalysts:", value=default_static_data["upcoming_catalysts"], key=f"catalysts_{ticker_to_edit}", height=100)
-                        
-                        # --- FIX: Add the submit button ---
-                        submitted_static = st.form_submit_button("Save Static Context", use_container_width=True)
-                        
-                        if submitted_static:
-                            try:
-                                # Use INSERT OR REPLACE (UPSERT)
-                                cursor.execute("""
-                                    INSERT INTO stocks (
-                                        ticker, company_description, sector, analyst_target, 
-                                        insider_activity_summary, historical_level_notes, upcoming_catalysts, last_updated
-                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                                    ON CONFLICT(ticker) DO UPDATE SET
-                                        company_description = excluded.company_description,
-                                        sector = excluded.sector,
-                                        analyst_target = excluded.analyst_target,
-                                        insider_activity_summary = excluded.insider_activity_summary,
-                                        historical_level_notes = excluded.historical_level_notes,
-                                        upcoming_catalysts = excluded.upcoming_catalysts,
-                                        last_updated = excluded.last_updated;
-                                """, (
-                                    ticker_to_edit, company_description_val, sector_val, 
-                                    analyst_target_val, insider_activity_val, 
-                                    historical_notes_val, catalysts_val, date.today().isoformat()
-                                ))
-                                
-                                conn.commit()
-                                st.success(f"Successfully saved static context for ${ticker_to_edit}!")
-                                # Clear the 'new ticker' input if it was used
-                                if new_ticker_input: 
-                                     st.session_state['new_ticker_input_editor'] = ""
-                                st.rerun() # Rerun to refresh the ticker list and clear form state
-                            
-                            except sqlite3.Error as e:
-                                st.error(f"Database error: {e}")
-                
-                st.markdown("---")
-
-                # --- Section 2: AI's 'Company Overview Card' Editor (The JSON Editor) --- 
-                st.subheader("Section 2: AI's 'Company Overview Card' (Editable)") 
-                st.caption("This is the AI's 6-part 'Company Overview Card' that it generated. Review it and correct any mistakes before running the screener.")
-                
-                # Use a unique key for the text_area as well
-                json_text_to_edit = st.text_area("Company Overview Card JSON:", value=default_json_text, height=600, key=f"json_editor_{ticker_to_edit}")
-
-                if st.button("Save 'Company Overview Card' (Your Override)", use_container_width=True): 
-                    try:
-                        # 1. Validate the JSON
-                        valid_json = json.loads(json_text_to_edit) 
-                        
-                        # Re-stringify to ensure consistent formatting
-                        json_string_to_save = json.dumps(valid_json, indent=2)
-
-                        # 2. Save to DB (This updates the AI's card)
-                        # Ensure the record exists before updating JSON (use UPSERT logic indirectly)
-                        cursor.execute("""
-                            INSERT INTO stocks (ticker, company_overview_card_json, last_updated)
-                            VALUES (?, ?, ?)
-                            ON CONFLICT(ticker) DO UPDATE SET
-                                company_overview_card_json = excluded.company_overview_card_json,
-                                last_updated = excluded.last_updated;
-                        """, (ticker_to_edit, json_string_to_save, date.today().isoformat()))
-                        
-                        conn.commit()
-                        st.success(f"Successfully saved (overwrote) 'Company Overview Card' for ${ticker_to_edit}!") 
-                        # Force a rerun to ensure the editor reloads the *saved* version
-                        st.rerun() 
-                    
-                    except json.JSONDecodeError:
-                        st.error("Invalid JSON: The text could not be parsed. Please check your syntax (commas, quotes, brackets).")
-                    except sqlite3.Error as e:
-                        st.error(f"Database error: {e}")
-                        
-            except sqlite3.Error as e:
-                st.error(f"Database error: {e}")
+                        json_txt = json.dumps(json.loads(data["company_overview_card_json"]), indent=2)
+                    except:
+                        json_txt = data["company_overview_card_json"]
+                with st.expander("Static: Historical Notes", expanded=True):
+                    with st.form(f"notes_form_{ticker_edit}"):
+                        notes_val = st.text_area("Notes:", value=notes, key=f"hist_{ticker_edit}", height=200)
+                        if st.form_submit_button("Save Notes", use_container_width=True):
+                            try: 
+                                cursor.execute("INSERT INTO stocks (ticker,historical_level_notes,last_updated) VALUES(?,?,?) ON CONFLICT(ticker) DO UPDATE SET historical_level_notes=excluded.historical_level_notes, last_updated=excluded.last_updated", (ticker_edit, notes_val, date.today().isoformat()))
+                                conn.commit(); st.success("Notes saved!"); 
+                                if new_ticker: st.session_state.new_ticker_editor_text = "" # Clear new ticker input
+                                st.rerun()
+                            except sqlite3.Error as e: st.error(f"DB err: {e}")
+                st.markdown("---"); st.subheader("Dynamic: EOD Card (Editable)"); st.caption("Review/correct AI's EOD JSON.")
+                json_edit = st.text_area("EOD JSON:", value=json_txt, height=600, key=f"json_{ticker_edit}")
+                if st.button("Save EOD Card", use_container_width=True):
+                    try: 
+                        valid=json.loads(json_edit); json_save=json.dumps(valid, indent=2); 
+                        cursor.execute("INSERT INTO stocks (ticker,company_overview_card_json,last_updated) VALUES(?,?,?) ON CONFLICT(ticker) DO UPDATE SET company_overview_card_json=excluded.company_overview_card_json, last_updated=excluded.last_updated", (ticker_edit, json_save, date.today().isoformat()))
+                        conn.commit(); st.success("EOD Card saved!"); st.rerun()
+                    except json.JSONDecodeError: st.error("Invalid JSON.")
+                    except sqlite3.Error as e: st.error(f"DB err: {e}")
+            except sqlite3.Error as e: st.error(f"DB err: {e}")
             finally:
-                if conn:
-                    conn.close()
+                if conn: conn.close()
 
-# --- TAB 2: Pipeline Runner (FINAL "Single Document" Version) ---
-with tab_runner:
-    st.header("Pipeline Runner (Workflow #1 - Daily)")
-    st.caption("This is your DAILY task. Paste the full output from the 'Intraday Analysis Processor' app here.")
-    st.success("This will have the AI Analyst read your Static Context and yesterday's 'Company Overview Card' to generate the NEW 'Company Overview Card' for today.") 
-    st.info(f"Using {len(API_KEYS)} API keys in rotation for rate limit avoidance.")
-
-    raw_text_input = st.text_area("Paste Raw Text Summaries Here:", height=300, placeholder="Paste the entire text block from the other app...")
-
-    if st.button("Run Pipeline Update", use_container_width=True):
-        if not raw_text_input:
-            st.warning("Please paste the raw text summaries before running.")
-        elif not os.path.exists(DATABASE_FILE):
-            st.error(f"Database file '{DATABASE_FILE}' not found. Please run 'final_database_setup.py' first.")
+# --- TAB 2: Pipeline Runner (EOD - Workflow 1) (Unchanged) ---
+with tab_runner_eod:
+    st.header("Pipeline Runner (EOD Update)")
+    st.caption("Paste EOD summaries from Processor.")
+    st.success("AI generates NEW EOD card.")
+    st.info(f"{len(API_KEYS)} keys in rotation.")
+    raw_txt = st.text_area("Paste EOD Summaries:", height=300, key="eod_raw")
+    if st.button("Run EOD Update", use_container_width=True, key="run_eod"):
+        if not raw_txt: st.warning("Paste text.")
+        elif not os.path.exists(DATABASE_FILE): st.error("DB missing.")
         else:
-            # --- Start Processing ---
-            # Split the text based on the "Data Extraction Summary:" header
-            summaries = re.split(r"(Data Extraction Summary:)", raw_text_input)
-            processed_summaries = []
-            
-            # Re-join the header with its content
-            if summaries and summaries[0].strip() == "":
-                summaries = summaries[1:] 
+            summaries=re.split(r"(Summary:\s*\w+\s*\|)", raw_txt); processed=[]
+            if len(summaries)>1 and not summaries[0].strip().startswith("Summary:"):
+                 if summaries[0].strip(): st.warning("Ignore text before first summary.")
+                 summaries = summaries[1:]
             for i in range(0, len(summaries), 2):
-                if i + 1 < len(summaries):
-                    full_summary = summaries[i] + summaries[i+1]
-                    processed_summaries.append(full_summary)
-            
-            if not processed_summaries:
-                st.warning("Could not find any 'Data Extraction Summary:' headers in the pasted text.")
+                 if i + 1 < len(summaries): processed.append(summaries[i] + summaries[i+1])
+            if not processed: st.warning("No summaries found (check format).")
             else:
-                st.success(f"Found {len(processed_summaries)} summaries to process.")
-                log_container = st.expander("Processing Logs", expanded=True)
-                logger = AppLogger(st_container=log_container)
-                
-                total_start_time = time.time()
-                
-                for i, summary_text in enumerate(processed_summaries):
-                    # Parse just to get the ticker
-                    ticker = parse_raw_summary(summary_text).get('ticker')
-                    if not ticker:
-                        logger.log(f"SKIPPING: Could not parse ticker from summary chunk:\n{summary_text[:100]}...")
-                        continue
-                    
-                    try:
-                        # Select key for rotation
-                        key_to_use = API_KEYS[i % len(API_KEYS)]
-                        
-                        # --- THIS IS THE FINAL, AUTOMATED FUNCTION ---
-                        update_stock_note(ticker, summary_text, key_to_use, logger)
-                        
-                    except Exception as e:
-                        logger.log(f"!!! CRITICAL ERROR updating {ticker}: {e}")
-                        
-                    # Wait 1 second between calls to respect API rate limits
-                    if i < len(processed_summaries) - 1:
-                        logger.log(f"   ...waiting 1 second to avoid API rate limits...")
-                        time.sleep(1)
-                        
-                total_end_time = time.time()
-                logger.log(f"--- PIPELINE RUN COMPLETE ---")
-                logger.log(f"Total time: {total_end_time - total_start_time:.2f} seconds.")
-                st.info("Pipeline run complete. Go to the 'Company Overview Card Editor' to review and edit the AI's work.")
+                st.success(f"Found {len(processed)} summaries."); logs=st.expander("Logs", True); logger=AppLogger(logs); t_start=time.time()
+                for i, s in enumerate(processed):
+                    key=random.choice(API_KEYS) # --- USE RANDOM KEY ---
+                    ticker=parse_raw_summary(s).get('ticker')
+                    if not ticker: logger.log(f"SKIP EOD: No ticker {s[:100]}..."); continue
+                    try: update_stock_note(ticker, s, key, logger)
+                    except Exception as e: logger.log(f"!!! EOD ERR {ticker}: {e}")
+                    if i<len(processed)-1: logger.log("   ...wait 1s..."); time.sleep(1)
+                t_end=time.time(); logger.log("--- EOD DONE ---"); logger.log(f"Time: {t_end-t_start:.2f}s."); st.info("EOD done.")
 
-
-# --- TAB 3: Trade Screener (FINAL "Single Document" Version) ---
-with tab_screener:
-    st.header("Trade Screener (Workflow #2)")
-    st.caption("This will filter all 'Company Overview Cards' by 'Confidence', then feed the FULL 6-part JSON card for each finalist to the AI for informed ranking.") 
-    st.warning("Make sure you have reviewed and corrected any AI mistakes in the 'Company Overview Card Editor' tab before running this.")
+# --- TAB 3: Pre-Flight Check (Workflow 2a) (UPDATED) ---
+with tab_preflight:
+    st.header("Tactical Update: Pre-Flight Check (Workflow 2a)")
+    st.caption("Select tickers, add news, and generate temporary 'Pre-Market Tactical Cards' using Capital.com data.")
     
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        market_condition_input = st.text_area(
-            "Overall Market Condition (Critical Context for AI):", 
-            height=150, 
-            placeholder="E.g., The SPY closed above its POC for the third day..."
-        )
-    with col2:
-        confidence_filter = st.selectbox(
-            "Filter by Confidence:",
-            options=["All", "High", "Medium", "Low"],
-            help="Filters setups based on the AI's 'confidence' field (e.g., 'High - ...')."
-        )
-
-    if st.button("Run Screener", use_container_width=True):
-        if not market_condition_input:
-            st.warning("Please provide a summary of the Overall Market Condition.")
-        elif not os.path.exists(DATABASE_FILE):
-            st.error(f"Database file '{DATABASE_FILE}' not found. Please run 'final_database_setup.py' first.")
-        else:
-            screener_log_container = st.expander("Screener Logs", expanded=True)
-            screener_logger = AppLogger(st_container=screener_log_container)
-            
-            # Always use the first key for the screener (a single call)
-            key_to_use = API_KEYS[0] 
-            
-            with st.spinner("Analyzing all 'Company Overview Cards' and generating ranked list..."): 
-                
-                # --- This function is now FINAL and sends the FULL card ---
-                ranked_result = run_screener(market_condition_input, confidence_filter, key_to_use, screener_logger)
-            
-            st.markdown("---")
-            st.subheader(f"Final Ranked Trade Setups (Confidence: {confidence_filter})")
-            # Display the result using st.markdown to render potential newlines correctly
-            st.markdown(ranked_result) 
-
-# --- TAB 4: Battle Card Viewer (NEW - Replaces Archive Viewer) ---
-with tab_battle_card_viewer:
-    st.header("Battle Card Viewer (AI 'Company Overview Card' & Screener Input)") 
-    st.caption("Inspect the AI's full analysis and see the exact data sent to the screener.")
-
-    if not os.path.exists(DATABASE_FILE):
-        st.error(f"Database file '{DATABASE_FILE}' not found. Run 'final_database_setup.py' first.")
-    else:
-        # Fetch tickers within this tab's scope
-        conn_viewer = None
-        all_tickers_bc = []
+    # --- Capital.com Authentication ---
+    st.subheader("Capital.com Status")
+    capital_secrets = st.secrets.get("capital_com", {})
+    if not all(capital_secrets.get(k) for k in ["X_CAP_API_KEY", "identifier", "password"]):
+         st.error("Capital.com secrets not found in st.secrets. Add [capital_com] section.")
+         st.code("""
+[capital_com]
+X_CAP_API_KEY = "YOUR_KEY"
+identifier = "your_email@gmail.com"
+password = "your_password"
+         """)
+         st.stop()
+    
+    session_data = st.session_state.capital_session
+    session_time_utc_iso = session_data.get("time_utc_iso") # --- FIX: Read ISO string ---
+    cst = session_data.get("cst")
+    xst = session_data.get("xst")
+    
+    is_session_valid = False
+    session_status_placeholder = st.empty()
+    
+    session_time_utc_dt = None
+    if session_time_utc_iso and cst and xst:
         try:
-             conn_viewer = sqlite3.connect(DATABASE_FILE)
-             # Only fetch tickers that actually have a JSON card
-             df_tickers_bc = pd.read_sql_query("SELECT DISTINCT ticker FROM stocks WHERE company_overview_card_json IS NOT NULL AND company_overview_card_json != '' ORDER BY ticker ASC", conn_viewer) 
-             all_tickers_bc = df_tickers_bc['ticker'].tolist()
+            # --- FIX: Convert ISO string back to aware datetime ---
+            session_time_utc_dt = datetime.fromisoformat(session_time_utc_iso)
+            expiration_time_utc = session_time_utc_dt + timedelta(minutes=30)
+            time_now_utc = datetime.now(timezone.utc) # Get aware current time
+            
+            if time_now_utc < expiration_time_utc: # Correct comparison
+                 is_session_valid = True
+                 # --- FIX: Use UTC for display as requested ---
+                 session_status_placeholder.success(f"Capital.com session active (Expires ~ {expiration_time_utc.strftime('%H:%M:%S')} UTC)")
+            else:
+                 session_status_placeholder.warning(f"Capital.com session expired at {expiration_time_utc.strftime('%H:%M:%S')} UTC.")
         except Exception as e:
-            st.error(f"Error fetching tickers for viewer: {e}")
-        finally:
-             if conn_viewer:
-                 conn_viewer.close()
+             session_status_placeholder.error(f"Error parsing session time: {e}")
+             session_time_utc_iso = None # Force refresh
+             
+    if not is_session_valid:
+        button_text = "Refresh Session" if session_time_utc_iso else "Create Capital.com Session"
+        if st.button(button_text, use_container_width=True, key="create_refresh_session"):
+             log_container_session = st.expander("Session Log", True)
+             logger_session = AppLogger(log_container_session)
+             with st.spinner("Creating session..."):
+                 cst_new, xst_new, balance = create_capital_session(logger_session) # Call with _logger
+                 if cst_new and xst_new:
+                     # --- FIX: Store time as UTC ISO string ---
+                     st.session_state.capital_session = {"cst": cst_new, "xst": xst_new, "time_utc_iso": datetime.now(timezone.utc).isoformat()}
+                     st.rerun()
+                 else:
+                     st.error("Session creation failed. Check secrets/credentials.")
+                     st.session_state.capital_session = {"cst":None, "xst":None, "time_utc_iso":None}
+        st.stop()
 
-        if not all_tickers_bc:
-            st.warning("No tickers found with Overview Cards. Run the 'Pipeline Runner' or initialize in the Editor.")
+
+    # --- Pre-Flight Inputs (Only show if session is valid) ---
+    st.markdown("---")
+    st.subheader("Generate Tactical Cards")
+    if not os.path.exists(DATABASE_FILE): st.error("DB missing.")
+    else:
+        all_tickers_pf = get_all_tickers_from_db()
+        if not all_tickers_pf: st.warning("No tickers in DB.")
         else:
-            options_bc = [""] + all_tickers_bc
-            # Use session state for viewer selection as well
-            if 'selected_ticker_bc' not in st.session_state:
-                st.session_state['selected_ticker_bc'] = ""
-            selected_ticker_bc = st.selectbox("Select Ticker to View:", options=options_bc, key="selected_ticker_bc")
+            selected_tickers_pf = st.multiselect("1. Select Tickers (EPICs):", options=all_tickers_pf, default=st.session_state.get('last_selected_tickers',[]), key="pf_tickers",
+                                               help="Ensure these are the exact Capital.com EPICS (e.g., 'AMD', 'AAPL').")
+            news_pf = st.text_area("2. Overnight News:", placeholder="e.g., SNOW beat...", height=150, key="pf_news")
+            if st.button("Generate Pre-Market Cards", use_container_width=True, key="gen_pm_cards"):
+                if not selected_tickers_pf: st.warning("Select tickers.")
+                else:
+                    st.session_state['last_selected_tickers'] = selected_tickers_pf
+                    logs_pf = st.expander("Logs", True); logger_pf = AppLogger(logs_pf)
+                    with st.spinner("Fetching Capital.com data & synthesizing..."):
+                        success = generate_premarket_tactical_cards(
+                            selected_tickers_pf, news_pf, logger_pf,
+                            cst=st.session_state.capital_session["cst"],
+                            xst=st.session_state.capital_session["xst"]
+                        )
+                        if success: st.success("Pre-market gen complete."); st.info(f"Generated for {len(st.session_state.get('premarket_cards',{}))} tickers."); st.write("Tickers:", ", ".join(st.session_state.get('premarket_cards',{}).keys()))
+                        else: st.error("Pre-market gen failed."); st.session_state['premarket_cards'] = {}
 
-            if selected_ticker_bc:
-                conn_data = None
-                try:
-                    conn_data = sqlite3.connect(DATABASE_FILE)
-                    # Fetch only the JSON for the selected ticker
-                    cursor = conn_data.cursor()
-                    cursor.execute("SELECT company_overview_card_json FROM stocks WHERE ticker = ?", (selected_ticker_bc,))
-                    data_row = cursor.fetchone()
 
-                    if data_row and data_row[0]:
-                        json_string = data_row[0]
-                        parsed_overview_json = None # For storing the parsed dict
-                        
-                        # --- Section 1: Full 'Company Overview Card' JSON --- 
-                        st.subheader(f"Full 'Company Overview Card' JSON for ${selected_ticker_bc}") 
-                        try:
-                            # Pretty print the JSON
-                            parsed_overview_json = json.loads(json_string)
-                            st.json(parsed_overview_json, expanded=True) # Expand by default for viewing
-                        except json.JSONDecodeError:
-                            st.error("Could not parse the stored JSON. Displaying raw text:")
-                            st.code(json_string, language='text')
-
-                        st.markdown("---")
-                        
-                        # --- Section 2: Data Sent to Screener AI ---
-                        st.subheader("Data Sent to Screener AI for this Ticker")
-                        st.caption("This is the exact information the screener AI uses for ranking (extracted from the JSON above).")
-                        
-                        # Use the already parsed JSON if available
-                        data_dict_for_extraction = parsed_overview_json if parsed_overview_json else {}
-                        
-                        # Define helper function inside, or ensure it's available
-                        def get_screener_field(data_dict, path, default="N/A"):
-                            keys = path.split('.')
-                            value = data_dict
+# --- TAB 4: Battle Card Viewer (Unchanged) ---
+with tab_viewer:
+    st.header("Review: Battle Card Viewer")
+    st.caption("Compare EOD Card vs Pre-Market Card.")
+    if not os.path.exists(DATABASE_FILE): st.error("DB missing.")
+    else:
+        all_tickers_v = get_all_tickers_from_db()
+        pm_tickers = list(st.session_state.get('premarket_cards',{}).keys())
+        opts_v = [""] + sorted(pm_tickers) + sorted([t for t in all_tickers_v if t not in pm_tickers])
+        if not all_tickers_v: st.warning("No tickers in DB.")
+        else:
+            if 'selected_ticker_viewer' not in st.session_state: st.session_state['selected_ticker_viewer']=""
+            sel_ticker_v = st.selectbox("Ticker:", options=opts_v, key="selected_ticker_viewer")
+            if sel_ticker_v:
+                col1_v, col2_v = st.columns(2)
+                with col1_v: # EOD Card
+                    st.subheader("EOD Card (DB)"); conn_eod=None
+                    try:
+                        conn_eod=sqlite3.connect(DATABASE_FILE); cur=conn_eod.cursor(); cur.execute("SELECT company_overview_card_json FROM stocks WHERE ticker=?", (sel_ticker_v,)); row=cur.fetchone()
+                        if row and row[0]:
+                            try: st.json(json.loads(row[0]), expanded=False)
+                            except json.JSONDecodeError: st.error("Invalid EOD JSON."); st.code(row[0])
+                        else: st.warning("No EOD card.")
+                    except sqlite3.Error as e: st.error(f"DB err EOD: {e}")
+                    finally:
+                        if conn_eod: conn_eod.close()
+                with col2_v: # Pre-Market Card
+                    st.subheader("Pre-Market Card (Memory)");
+                    if sel_ticker_v in st.session_state.get('premarket_cards',{}):
+                        pm_card_v = st.session_state['premarket_cards'][sel_ticker_v]
+                        if isinstance(pm_card_v, dict):
+                             st.json(pm_card_v, expanded=True)
+                        else:
+                             st.error("PM card data invalid."); st.code(str(pm_card_v))
+                        st.markdown("---"); st.subheader("Key Data for Screener"); st.caption("(From Pre-Market Card)")
+                        def get_v_field(d,p,df="N/A"): # Local helper
+                            if not isinstance(d, dict): return df
+                            k=p.split('.'); v=d
                             try:
-                                for key in keys:
-                                    # Navigate safely
-                                    if not isinstance(value, dict): return default 
-                                    value = value.get(key)
-                                    if value is None: return default
-                                # Format lists
-                                if isinstance(value, list):
-                                    return " ".join(map(str, value))
-                                return str(value) if value is not None else default
-                            except:
-                                return default
+                                for key in k: v=v.get(key) if isinstance(v,dict) else None
+                                if isinstance(v,list): return " ".join(map(str,v)) or df
+                                return str(v) if v is not None else df
+                            except: return df
+                        if isinstance(pm_card_v, dict):
+                            fields_v = {
+                                "Confidence":'confidence',"Briefing":'screener_briefing',
+                                "Open Plan":'openingTradePlan.planName',"Alt Plan":'alternativePlan.planName',
+                                "Action":'technicalStructure.keyAction',"Support":'technicalStructure.majorSupport',
+                                "Resistance":'technicalStructure.majorResistance',"Live Price":'preMarketContext.livePrice',
+                                "PM Summary":'preMarketContext.tacticalSummary'
+                            }
+                            for name, path in fields_v.items(): st.markdown(f"**{name}:** `{get_v_field(pm_card_v, path)}`")
+                        else:
+                             st.warning("Cannot extract fields, PM card invalid.")
+                    else: st.info("No Pre-Market card generated.")
 
-                        # Extract the relevant fields for display
-                        screener_data_to_display = {
-                            "Confidence": get_screener_field(data_dict_for_extraction, 'confidence'),
-                            "Screener Briefing": get_screener_field(data_dict_for_extraction, 'screener_briefing'),
-                            "Bias": get_screener_field(data_dict_for_extraction, 'biasStrategy.bias'),
-                            "Bullish Trigger": get_screener_field(data_dict_for_extraction, 'biasStrategy.triggersBullish'),
-                            "Bearish Trigger": get_screener_field(data_dict_for_extraction, 'biasStrategy.triggersBearish'),
-                            "Technical Pattern": get_screener_field(data_dict_for_extraction, 'technicalStructure.pattern'),
-                            "Key Action": get_screener_field(data_dict_for_extraction, 'technicalStructure.keyAction'),
-                            "Valuation": get_screener_field(data_dict_for_extraction, 'fundamentalContext.valuation'),
-                            "Analyst Sentiment": get_screener_field(data_dict_for_extraction, 'fundamentalContext.analystSentiment'),
-                            "Insider Activity": get_screener_field(data_dict_for_extraction, 'fundamentalContext.insiderActivity'),
-                            "Sentiment Summary": get_screener_field(data_dict_for_extraction, 'sentimentSummary') 
-                        }
-                        
-                        # Display as key-value pairs using markdown for clarity
-                        for key, value in screener_data_to_display.items():
-                             st.markdown(f"**{key}:** `{value}`")
 
-                    else:
-                        st.warning(f"No 'Company Overview Card' JSON found for ${selected_ticker_bc}. Run the 'Pipeline Runner'.")
-
-                except sqlite3.Error as e:
-                    st.error(f"Database error reading card for {selected_ticker_bc}: {e}")
-                finally:
-                    if conn_data:
-                        conn_data.close()
+# --- TAB 5: Trade Screener (Workflow 2b) (Unchanged) ---
+with tab_screener:
+    st.header("Action: Trade Screener (Workflow 2b)")
+    st.caption("Ranks tactical setups from Pre-Flight Check.")
+    pm_cards_avail = st.session_state.get('premarket_cards',{})
+    if not pm_cards_avail: st.error("Generate Pre-Market Cards first."); st.stop()
+    st.info(f"**{len(pm_cards_avail)} Pre-Market Cards ready.**")
+    col1_s, col2_s = st.columns([3,1])
+    with col1_s: market_cond_s = st.text_area("Market Condition:", height=100, key="scr_market")
+    with col2_s: conf_filter_s = st.selectbox("Filter Confidence:", ["All","High","Medium","Low"], key="scr_conf")
+    if st.button("Run TACTICAL Screener", use_container_width=True, key="run_scr"):
+        if not market_cond_s: st.warning("Provide Market Condition.")
+        else:
+            cards_scr = {};
+            if conf_filter_s=="All": cards_scr=pm_cards_avail
+            else: cards_scr={t:c for t,c in pm_cards_avail.items() if str(c.get('confidence','')).startswith(conf_filter_s)}
+            if not cards_scr: st.warning(f"No cards match filter '{conf_filter_s}'.")
+            else:
+                logs_scr = st.expander("Logs", True); logger_scr = AppLogger(logs_scr)
+                key_scr = random.choice(API_KEYS) # --- USE RANDOM KEY ---
+                with st.spinner(f"AI ranking {len(cards_scr)} cards..."):
+                    result_scr = run_tactical_screener(market_cond_s, cards_scr, key_scr, logger_scr)
+                st.markdown("---"); st.subheader(f"Ranked Briefings (Filter: {conf_filter_s})")
+                if result_scr: st.markdown(result_scr, unsafe_allow_html=True)
+                else: st.error("Screener failed.")
 
 
 # --- Command Line Test Example (Unchanged) ---
 if __name__ == "__main__":
-    
-    print("This script is intended to be run with Streamlit:")
-    print("streamlit run pipeline_engine.py")
+    print("Run with: streamlit run pipeline_engine.py")
 
