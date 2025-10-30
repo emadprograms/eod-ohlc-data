@@ -561,7 +561,9 @@ def generate_premarket_economy_card(premarket_macro_news: str, logger: AppLogger
 
         **CRITICAL INSTRUCTIONS:**
         1.  **REWRITE TACTICAL FIELDS:** You MUST generate completely new values for `marketNarrative` and `marketBias`. These should reflect the immediate pre-market situation based on the live data and news.
-        2.  **APPEND TO ANALYTICAL FIELDS:** For the `sectorRotation`, `indexAnalysis`, `interMarketAnalysis`, and `marketInternals` fields, you MUST **keep the existing text** from the EOD card and **append** a new sub-section titled "**Pre-Market Update:**" containing your new analysis based on the `[Live Pre-Market Data]`. This creates a layered view showing both the strategic EOD context and the new tactical pre-market action.
+        2.  **APPEND TO ANALYTICAL FIELDS:** For fields that contain narrative analysis, you MUST keep the existing EOD text and append a new sub-section.
+            - For simple text fields like `sectorRotation` and `marketInternals`, append a new line with "**Pre-Market Update:**" followed by your new analysis.
+            - For dictionary fields like `indexAnalysis` (containing SPY, QQQ) and `interMarketAnalysis` (containing UUP, GLD, TLT, USO), you must go into **each key** (e.g., `SPY_SPX`, `Gold_GLD`, `Bonds_TLT`) and append the "**Pre-Market Update:**" to its existing string value. This is mandatory for all items within these dictionaries.
         3.  **PRESERVE THE HISTORICAL LOG:** The ONLY field you must not change is `marketKeyAction`. It is a running log of the strategic story from previous EOD updates. Do NOT modify or delete its existing content.
         4.  **UPDATE `keyEconomicEvents`:** Refresh the `next_24h` field based on the current time.
         5.  **OUTPUT FORMAT:** Output ONLY the single, complete, updated JSON object.
