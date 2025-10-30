@@ -47,7 +47,7 @@ def get_gemini_response(input_prompt, image_parts):
         genai.configure(api_key=api_key)
 
         # Select the model and generate content
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        model = genai.GenerativeModel('gemini-2.5-pro')
         response = model.generate_content([input_prompt, *image_parts])
         return response.text
 
