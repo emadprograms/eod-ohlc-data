@@ -976,6 +976,11 @@ def generate_premarket_tactical_cards(selected_tickers: list, overnight_news: st
         if conn: conn.close()
 
 
+# --- Constants for Tactical Screener ---
+REQUIRED_PREMARKET_CARD_KEYS = ['marketNote', 'confidence', 'preMarketContext', 'technicalStructure', 'openingTradePlan', 'alternativePlan']
+MARKDOWN_FENCE_PATTERN = r"^\s*```[a-zA-Z]*\s*\n?|\n?\s*```\s*$"
+SCREENER_ERROR_PREFIX = "Screener Error: "
+
 # --- Workflow 2b: Tactical Screener ---
 def run_tactical_screener(market_condition: str, pre_market_cards: dict, economy_card: dict, api_key_to_use: str, logger: AppLogger):
     """
@@ -986,7 +991,7 @@ def run_tactical_screener(market_condition: str, pre_market_cards: dict, economy
     
     if not pre_market_cards:
         logger.log("Error: No Pre-Market Cards provided.")
-        return "Error: No pre-market cards."
+        return f"{SCREENER_ERROR_PREFIX}No pre-market cards provided."
     
     logger.log(f"1. Preparing {len(pre_market_cards)} pre-market cards...")
     
@@ -997,7 +1002,7 @@ def run_tactical_screener(market_condition: str, pre_market_cards: dict, economy
             economy_context_text = json.dumps(economy_card, indent=2)
             logger.log("   ...Economy Card context loaded for screener.")
         except Exception as e:
-            logger.log(f"   ...Warn: Could not serialize Economy Card: {e}")
+            logger.log(f"   ...Warn: Could not serialize Economy Card to JSON: {e}")
             economy_context_text = str(economy_card)
     else:
         logger.log("   ...Warn: No Economy Card provided. Screener will lack macro context.")
@@ -1025,8 +1030,7 @@ def run_tactical_screener(market_condition: str, pre_market_cards: dict, economy
     
     for ticker, card_dict in pre_market_cards.items():
         if isinstance(card_dict, dict):
-            req_keys_scr = ['marketNote', 'confidence', 'preMarketContext', 'technicalStructure', 'openingTradePlan', 'alternativePlan']
-            if all(key in card_dict for key in req_keys_scr):
+            if all(key in card_dict for key in REQUIRED_PREMARKET_CARD_KEYS):
                 candidate_list_text += f"\n--- Candidate: {ticker} ---\n{json.dumps(card_dict, indent=2)}\n--- End Candidate: {ticker} ---\n"
                 valid_count += 1
             else:
@@ -1036,7 +1040,7 @@ def run_tactical_screener(market_condition: str, pre_market_cards: dict, economy
     
     if not candidate_list_text:
         logger.log("Error: No valid cards to send.")
-        return "Error: No valid cards."
+        return f"{SCREENER_ERROR_PREFIX}No valid cards after validation."
     
     logger.log(f"   ...Sending {valid_count} candidates with macro context.")
     
@@ -1064,7 +1068,7 @@ Ensure 'Full Plan Details' is valid JSON."""
     
     if not ranked_list_details_text:
         logger.log("Error: No response from Screener AI.")
-        return "AI failed."
+        return f"{SCREENER_ERROR_PREFIX}AI did not return a response."
     
     logger.log("4. Received detailed ranked list.")
     logger.log("**Raw AI Response (Screener):**")
@@ -1072,7 +1076,7 @@ Ensure 'Full Plan Details' is valid JSON."""
     logger.log("--- FINAL SCREENER COMPLETE ---")
     
     # Clean up markdown code fences if present
-    cleaned_list = re.sub(r"^\s*```[a-zA-Z]*\s*\n?|\n?\s*```\s*$", "", ranked_list_details_text).strip()
+    cleaned_list = re.sub(MARKDOWN_FENCE_PATTERN, "", ranked_list_details_text).strip()
     
     return cleaned_list
 
