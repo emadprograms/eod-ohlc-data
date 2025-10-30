@@ -62,13 +62,13 @@ def make_gemini_call(prompt, image_parts=None):
         log_message(f"Using a randomly selected API key: {key_identifier}")
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        model = genai.GenerativeModel('gemini-2.5-pro')
 
         content = [prompt]
         if image_parts:
             content.extend(image_parts)
 
-        log_message(f"Generating content with model 'gemini-1.5-flash-latest'.")
+        log_message(f"Generating content with model 'gemini-2.5-pro'.")
         response = model.generate_content(content)
         log_message("Successfully received response from API.")
         return response.text
