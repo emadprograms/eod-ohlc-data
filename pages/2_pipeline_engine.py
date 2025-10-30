@@ -16,7 +16,7 @@ except ImportError:
     from datetime import timezone
     # This will be logged as a warning in the UI
     st.warning("`pytz` library not found. Pre-market/display time checks may be less accurate. Consider `pip install pytz`.")
-    US_EASTERN = timezone(timedelta(hours=-5)) # Fallback to EST
+    US_EASTERN = timezone(timedelta(hours=-5)) # FallbackST
     BAHRAIN_TZ = timezone(timedelta(hours=3)) # Fallback to Bahrain time +03:00
 
 from deepdiff import DeepDiff
@@ -974,6 +974,91 @@ def generate_premarket_tactical_cards(selected_tickers: list, overnight_news: st
     except Exception as e: logger.log(f"Unexpected error in generate_premarket_cards: {e}"); st.session_state['premarket_cards'] = {}; return False
     finally:
         if conn: conn.close()
+
+
+def run_tactical_screener(market_condition: str, pre_market_cards: dict, economy_card: dict, api_key_to_use: str, logger: AppLogger) -> str:
+    """
+    Acts as a Head Trader AI to rank the best tactical setups from a list of pre-market cards.
+    """
+    logger.log("--- Starting Workflow 2b: Tactical Screener ---")
+    if not pre_market_cards:
+        logger.log("Error: No pre-market cards provided to the screener.")
+        return "Error: No pre-market cards were available for ranking."
+
+    # 1. Prepare the context strings
+    economy_card_text = "Not available."
+    if economy_card:
+        try:
+            economy_card_text = json.dumps(economy_card, indent=2)
+        except Exception as e:
+            logger.log(f"Warning: Could not serialize Economy Card for screener: {e}")
+            economy_card_text = str(economy_card)
+
+    # 2. Summarize each candidate card to save tokens and focus the AI
+    candidate_summaries = []
+    for ticker, card in pre_market_cards.items():
+        if not isinstance(card, dict): continue
+        
+        summary = f"""
+        ---
+        Ticker: {ticker}
+        Confidence: {card.get('confidence', 'N/A')}
+        Live Price: {card.get('preMarketContext', {}).get('livePrice', 'N/A')}
+        Screener Briefing: {card.get('screener_briefing', 'N/A')}
+        Primary Plan: {card.get('openingTradePlan', {}).get('planName', 'N/A')}
+        Trigger: {card.get('openingTradePlan', {}).get('trigger', 'N/A')}
+        Invalidation: {card.get('openingTradePlan', {}).get('invalidation', 'N/A')}
+        ---
+        """
+        candidate_summaries.append(re.sub(r'\s+', ' ', summary).strip())
+    
+    all_candidates_text = "\n".join(candidate_summaries)
+    logger.log(f"Prepared {len(candidate_summaries)} candidate summaries for the AI.")
+
+    # 3. Define the System Prompt for the "Head Trader" AI
+    screener_system_prompt = (
+        "You are a Head Trader for a proprietary trading desk. Your task is to identify the top 3-5 highest-conviction trade ideas for the market open from a list of pre-screened candidates. "
+        "You must synthesize the overall macro context, the analyst's personal market view, and the specific details of each candidate's tactical card. "
+        "Your ranking should prioritize setups that are strongly aligned with the macro and analyst views, have a high confidence score, and present a clear, actionable plan with well-defined risk. "
+        "Provide a concise, well-reasoned justification for each of your top picks. The output must be in clear, readable Markdown format."
+    )
+
+    # 4. Construct the final prompt
+    prompt = f"""
+    [MACRO CONTEXT: The Economy Card]
+    This is the firm's official view on the current market environment.
+    {economy_card_text}
+
+    [ANALYST'S VIEW: Today's Market Condition]
+    This is the personal take from the analyst who generated the cards.
+    "{market_condition}"
+
+    [CANDIDATE TRADE IDEAS]
+    Here are the pre-screened tactical cards for individual stocks. Each has a plan, trigger, and confidence level.
+    {all_candidates_text}
+
+    [YOUR TASK]
+    As the Head Trader, analyze all the information above. Select the top 3-5 trade ideas that you believe have the highest probability of success for the opening session today.
+
+    For each of your ranked picks, provide the following in Markdown format:
+    - The rank (e.g., "1. Top Idea:").
+    - The Ticker.
+    - The Plan Name from the card.
+    - A **Justification:** A concise paragraph explaining WHY this is a top pick, referencing its alignment with the macro context, the analyst's view, and the strength of the technical setup (e.g., "This is the top pick because the bullish setup in AAPL aligns perfectly with the risk-on macro bias and the analyst's focus on tech. The stock is gapping above a key resistance, which is now expected to act as support, offering a clear entry trigger and a well-defined invalidation level.").
+
+    Begin your response with "### Head Trader's Top Picks for the Open".
+    """
+    
+    logger.log("Calling Head Trader AI to rank setups...")
+    ai_response = call_gemini_api(prompt, api_key_to_use, screener_system_prompt, logger)
+
+    if not ai_response:
+        logger.log("Error: The screener AI did not return a response.")
+        return "The AI screener failed to generate a ranking. Please check the logs."
+        
+    logger.log("--- Tactical Screener Complete ---")
+    return ai_response
+
 
 
 # --- 5. Streamlit Application UI (5 Tabs) ---
