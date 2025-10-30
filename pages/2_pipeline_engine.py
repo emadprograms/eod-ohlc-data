@@ -545,7 +545,7 @@ def generate_premarket_economy_card(premarket_macro_news: str, logger: AppLogger
 
         [DATA]
         1.  **Strategic EOD Economy Card (Yesterday's Close):**
-            (This is the established macro context.)
+            (This is the established macro context. Your task is to ADD to it, not replace it.)
             {json.dumps(eod_economy_card_dict, indent=2)}
 
         2.  **Live Pre-Market Data (Objective Action):**
@@ -557,12 +557,14 @@ def generate_premarket_economy_card(premarket_macro_news: str, logger: AppLogger
             "{premarket_macro_news or 'No major overnight macro news reported.'}"
 
         [YOUR TASK]
-        Generate the new, temporary "Pre-Market Economy Card" JSON.
-        - Create a new, concise `marketNarrative` for the open based on the live data and news.
-        - Adjust the `marketBias` based on the strength and direction of the pre-market movements across all asset classes.
-        - Update the `interMarketAnalysis` section with a tactical summary of what the live data implies (e.g., "Bonds (TLT) are down and Tech (XLK) is up, confirming a risk-on bias for the open.").
-        - Do NOT modify the `marketKeyAction`; that is a historical log.
-        - Output ONLY the single, complete, updated JSON object.
+        Generate the new, temporary "Pre-Market Economy Card" JSON using a hybrid update approach. The goal is to layer the new tactical information on top of the existing strategic context.
+
+        **CRITICAL INSTRUCTIONS:**
+        1.  **REWRITE TACTICAL FIELDS:** You MUST generate completely new values for `marketNarrative` and `marketBias`. These should reflect the immediate pre-market situation based on the live data and news.
+        2.  **APPEND TO ANALYTICAL FIELDS:** For the `sectorRotation`, `indexAnalysis`, `interMarketAnalysis`, and `marketInternals` fields, you MUST **keep the existing text** from the EOD card and **append** a new sub-section titled "**Pre-Market Update:**" containing your new analysis based on the `[Live Pre-Market Data]`. This creates a layered view showing both the strategic EOD context and the new tactical pre-market action.
+        3.  **PRESERVE THE HISTORICAL LOG:** The ONLY field you must not change is `marketKeyAction`. It is a running log of the strategic story from previous EOD updates. Do NOT modify or delete its existing content.
+        4.  **UPDATE `keyEconomicEvents`:** Refresh the `next_24h` field based on the current time.
+        5.  **OUTPUT FORMAT:** Output ONLY the single, complete, updated JSON object.
         """
 
         logger.log("4. Calling Pre-Market Macro AI...")
