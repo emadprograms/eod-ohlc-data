@@ -976,6 +976,107 @@ def generate_premarket_tactical_cards(selected_tickers: list, overnight_news: st
         if conn: conn.close()
 
 
+# --- Workflow 2b: Tactical Screener ---
+def run_tactical_screener(market_condition: str, pre_market_cards: dict, economy_card: dict, api_key_to_use: str, logger: AppLogger):
+    """
+    Ranks pre-market tactical setups using macro context from the economy card.
+    Uses "Acceptance vs. Rejection" philosophy based on EMH.
+    """
+    logger.log("--- Starting Workflow 2b: Final Tactical Screener Ranking ---")
+    
+    if not pre_market_cards:
+        logger.log("Error: No Pre-Market Cards provided.")
+        return "Error: No pre-market cards."
+    
+    logger.log(f"1. Preparing {len(pre_market_cards)} pre-market cards...")
+    
+    # Build economy context for the prompt
+    economy_context_text = "Not available."
+    if economy_card:
+        try:
+            economy_context_text = json.dumps(economy_card, indent=2)
+            logger.log("   ...Economy Card context loaded for screener.")
+        except Exception as e:
+            logger.log(f"   ...Warn: Could not serialize Economy Card: {e}")
+            economy_context_text = str(economy_card)
+    else:
+        logger.log("   ...Warn: No Economy Card provided. Screener will lack macro context.")
+    
+    logger.log("2. Building FINAL 'Smarter Ranking' Prompt...")
+    
+    screener_system_prompt_final = (
+        "You are an expert Head Trader using Efficient Market Hypothesis (EMH) for opening trades. Core philosophy: 'Acceptance vs. Rejection'.\n"
+        "**Core Philosophy:** PreMarket shows new 'fair value'. Trade is ACCEPTANCE (moves beyond) or REJECTION (fails/reverses). Gap TO major level = high-prob REJECTION.\n"
+        "**Macro Context:** You MUST consider the global economy card. If macro is risk-off, be skeptical of bullish breakouts. If risk-on, favor continuation patterns.\n"
+        "**Reasoning:** 1. Read macro context from Economy Card. 2. Read `preMarketContext` for each stock. 3. Compare `livePrice` to `majorSupport`/`Resistance` -> Accept/Reject? 4. Select matching plan (`opening` or `alternative`). 5. Rank by clarity of 'trap' AND alignment with macro. 6. Output 'Trade Briefing'.\n"
+        "**Output Format:** For EACH ranked stock:\n"
+        "### **[Rank]. [Ticker]**\n"
+        "- **Selected Plan:** [Name of ACTIVE plan]\n"
+        "- **Macro Alignment:** [How this setup aligns or conflicts with the macro view]\n"
+        "- **Rationale (Acceptance vs. Rejection):** [Explain WHY: gap, level, trapped participants]\n"
+        "- **Full Plan Details:** [JSON object: trigger, invalidation, knownP, expectedP of selected plan]\n"
+        "- **Key Risk:** [Main risk invalidating plan]\n"
+        "Output ONLY the ranked list in structured Markdown."
+    )
+    
+    # Prepare candidate list
+    candidate_list_text = ""
+    valid_count = 0
+    
+    for ticker, card_dict in pre_market_cards.items():
+        if isinstance(card_dict, dict):
+            req_keys_scr = ['marketNote', 'confidence', 'preMarketContext', 'technicalStructure', 'openingTradePlan', 'alternativePlan']
+            if all(key in card_dict for key in req_keys_scr):
+                candidate_list_text += f"\n--- Candidate: {ticker} ---\n{json.dumps(card_dict, indent=2)}\n--- End Candidate: {ticker} ---\n"
+                valid_count += 1
+            else:
+                logger.log(f"   ...Skip {ticker}: Pre-market card invalid structure.")
+        else:
+            logger.log(f"   ...Skip {ticker}: Invalid data type.")
+    
+    if not candidate_list_text:
+        logger.log("Error: No valid cards to send.")
+        return "Error: No valid cards."
+    
+    logger.log(f"   ...Sending {valid_count} candidates with macro context.")
+    
+    # Build the final prompt with economy card context
+    prompt_final = f"""[Context]
+- **Global Economy Card (Macro View):**
+{economy_context_text}
+
+- **Overall Market Condition (User Input):** "{market_condition}"
+
+[Data]
+- **Candidate Stocks (Full JSON 'Pre-Market Tactical Cards'):**
+{candidate_list_text}
+
+[Action]
+Provide ranked list using 'Trade Briefing' Markdown format for EACH stock. 
+**CRITICAL:** Your ranking MUST consider the macro context from the Economy Card. For example, if the economy card shows risk-off sentiment (bonds up, equities weak), prioritize short setups or rejection patterns. If risk-on, favor acceptance/breakout patterns.
+Ensure 'Full Plan Details' is valid JSON."""
+    
+    key = api_key_to_use
+    key_idx = API_KEYS.index(key) if key in API_KEYS else -1
+    logger.log(f"3. Calling Final Screener AI (key #{key_idx + 1})...")
+    
+    ranked_list_details_text = call_gemini_api(prompt_final, key, screener_system_prompt_final, logger)
+    
+    if not ranked_list_details_text:
+        logger.log("Error: No response from Screener AI.")
+        return "AI failed."
+    
+    logger.log("4. Received detailed ranked list.")
+    logger.log("**Raw AI Response (Screener):**")
+    logger.log_code(ranked_list_details_text, language='markdown')
+    logger.log("--- FINAL SCREENER COMPLETE ---")
+    
+    # Clean up markdown code fences if present
+    cleaned_list = re.sub(r"^\s*```[a-zA-Z]*\s*\n?|\n?\s*```\s*$", "", ranked_list_details_text).strip()
+    
+    return cleaned_list
+
+
 # --- 5. Streamlit Application UI (5 Tabs) ---
 
 st.set_page_config(page_title="Analyst Pipeline Engine (FINAL)", layout="wide")
