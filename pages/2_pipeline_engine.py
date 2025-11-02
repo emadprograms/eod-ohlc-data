@@ -21,6 +21,11 @@ except ImportError:
 
 from deepdiff import DeepDiff
 import random # --- ADDED FOR RANDOM KEY SELECTION ---
+import textwrap
+from modules.card_display import display_view_market_note_card, display_editable_market_note_card, display_view_economy_card, display_editable_economy_card
+
+# --- Direct import from the processor page ---
+from pages.processor import generate_analysis_text, STOCK_TICKERS, ETF_TICKERS
 
 # --- Constants ---
 DATABASE_FILE = "analysis_database.db"
@@ -233,6 +238,46 @@ def call_gemini_api(prompt: str, api_key: str, system_prompt: str, logger: AppLo
             logger.log(f"API Request fail: {e} (Key #{current_key_index + 1}). Retry {i+1}/{max_retries}...");
             if i < max_retries - 1: time.sleep(2**i)
     logger.log(f"API failed after {max_retries} retries."); return None
+
+# --- NEW HELPER: Run Processor Script ---
+def run_processor_script(processor_type: str, logger: AppLogger) -> str:
+    """
+    Runs the 1_processor.py script as a subprocess and captures its output.
+    :param processor_type: 'stocks' or 'etfs'
+    :return: The captured stdout text from the script, or an error message.
+    """
+    script_path = os.path.join("pages", "1_processor.py")
+    if not os.path.exists(script_path):
+        logger.log(f"ERROR: Processor script not found at {script_path}")
+        return "ERROR: Processor script not found."
+
+    # Use sys.executable to ensure we use the same python interpreter
+    command = [sys.executable, script_path, "--type", processor_type]
+    
+    try:
+        logger.log(f"Running command: {' '.join(command)}")
+        process = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True,  # Raises CalledProcessError for non-zero exit codes
+            timeout=300  # 5-minute timeout
+        )
+        logger.log("Processor script finished successfully.")
+        return process.stdout
+    except subprocess.CalledProcessError as e:
+        error_message = f"ERROR running processor script:\nSTDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}"
+        logger.log(error_message)
+        return error_message
+    except subprocess.TimeoutExpired as e:
+        error_message = f"ERROR: Processor script timed out after 5 minutes.\nSTDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}"
+        logger.log(error_message)
+        return error_message
+    except Exception as e:
+        error_message = f"An unexpected error occurred: {e}"
+        logger.log(error_message)
+        return error_message
+
 
 # --- Workflow #1: Daily Note Generator (Unchanged) ---
 def update_stock_note(ticker_to_update: str, new_raw_text: str, macro_context_summary: str, api_key_to_use: str, logger: AppLogger):
@@ -601,7 +646,6 @@ def generate_premarket_economy_card(premarket_macro_news: str, logger: AppLogger
         if conn:
             conn.close()
 
-
             
 # ---
 # --- Capital.com Authentication & Data Functions (Imported from Tester) ---
@@ -810,7 +854,7 @@ def process_premarket_bars_to_summary(ticker: str, df_pm: pd.DataFrame, live_pri
         return f"Pre-Market Summary: {ticker} | {date.today().isoformat()} (Live Price: ${live_price:.2f}. Error processing bars.)"
 
 
-
+            
 # --- Workflow 2a-Part2 - Generate Pre-Market Tactical Cards (UPDATED with Economy Card) ---
 def generate_premarket_tactical_cards(selected_tickers: list, overnight_news: str, premarket_economy_card: dict, logger: AppLogger, cst: str, xst: str):
     logger.log("--- Starting Workflow 2a-Part2: Generate Pre-Market Company Cards ---")
@@ -1114,6 +1158,8 @@ def extract_json_field(json_string, field_path, default="N/A"):
 
 # --- Initialize session state ---
 if 'premarket_cards' not in st.session_state: st.session_state['premarket_cards'] = {}
+if 'edit_mode' not in st.session_state: st.session_state['edit_mode'] = False
+if 'edit_mode_economy' not in st.session_state: st.session_state['edit_mode_economy'] = False
 # --- NEW: Add economy cards to session state ---
 if 'eod_economy_card' not in st.session_state: st.session_state['eod_economy_card'] = None
 if 'last_selected_tickers' not in st.session_state: st.session_state['last_selected_tickers'] = []
@@ -1126,109 +1172,16 @@ if 'capital_session' not in st.session_state:
 
 
 # --- Define 5 Tabs ---
-tab_editor, tab_runner_eod, tab_preflight, tab_viewer, tab_screener = st.tabs([
-    "Context & EOD Card Editor", # Combined Editor
+tab_runner_eod, tab_editor, tab_preflight, tab_viewer, tab_screener = st.tabs([
     "Pipeline Runner (EOD)",     # Workflow 1
+    "Context & EOD Card Editor", # Combined Editor
     "Pre-Flight Check",          # Workflow 2a
     "Battle Card Viewer",        # Comparison Viewer
     "Trade Screener (Tactical)"  # Workflow 2b
 ])
 
-# --- TAB 1: Context & EOD Card Editor (Unchanged) ---
-with tab_editor:
-    st.header("Context & EOD Card Editor")
-    st.caption("Set `Historical Notes` & review/edit EOD Cards.")
-
-    # --- NEW: Economy Card Editor ---
-    st.markdown("---")
-    st.subheader("Global Economy Card")
-    st.caption("This is the single, global context card for the entire market.")
-    
-    conn_eco = None
-    try:
-        conn_eco = sqlite3.connect(DATABASE_FILE)
-        cursor_eco = conn_eco.cursor()
-        cursor_eco.execute("SELECT economy_card_json FROM market_context WHERE context_id = 1")
-        eco_data = cursor_eco.fetchone()
-        
-        eco_json_text = DEFAULT_ECONOMY_CARD_JSON
-        if eco_data and eco_data[0]:
-            try:
-                eco_json_text = json.dumps(json.loads(eco_data[0]), indent=2)
-            except (json.JSONDecodeError, TypeError):
-                eco_json_text = eco_data[0] # Show raw text if it's not valid JSON
-
-        with st.form("economy_card_form"):
-            edited_eco_json = st.text_area("Economy Card JSON:", value=eco_json_text, height=400, key="eco_json_editor")
-            if st.form_submit_button("Save Economy Card", use_container_width=True):
-                try:
-                    # Validate JSON before saving
-                    valid_json = json.loads(edited_eco_json)
-                    json_to_save = json.dumps(valid_json, indent=2)
-                    cursor_eco.execute("UPDATE market_context SET economy_card_json = ?, last_updated = ? WHERE context_id = 1", (json_to_save, date.today().isoformat()))
-                    conn_eco.commit()
-                    st.success("Global Economy Card saved successfully!")
-                    st.rerun()
-                except json.JSONDecodeError:
-                    st.error("Invalid JSON format. Please correct and try again.")
-                except sqlite3.Error as e:
-                    st.error(f"Database error saving economy card: {e}")
-
-    except sqlite3.Error as e:
-        st.error(f"Database error loading economy card: {e}")
-    finally:
-        if conn_eco:
-            conn_eco.close()
-    # --- END NEW SECTION ---
-
-    st.markdown("---")
-    st.subheader("Individual Stock Cards")
-    if not os.path.exists(DATABASE_FILE): st.error(f"DB not found.")
-    else:
-        all_tickers = get_all_tickers_from_db(); col1, col2 = st.columns([2,1])
-        with col1: options = [""] + all_tickers; selected_ticker = st.selectbox("Ticker:", options, key="selected_ticker_editor")
-        with col2: new_ticker = st.text_input("Or Add:", key="new_ticker_editor_text")
-        ticker_edit = new_ticker.upper() if new_ticker else selected_ticker
-        if new_ticker and selected_ticker: st.warning("Clear one."); ticker_edit = ""
-        if ticker_edit:
-            st.markdown("---"); st.subheader(f"Edit: ${ticker_edit}")
-            conn=None
-            try:
-                conn=sqlite3.connect(DATABASE_FILE); conn.row_factory=sqlite3.Row; cursor=conn.cursor()
-                cursor.execute("SELECT historical_level_notes, company_overview_card_json FROM stocks WHERE ticker=?", (ticker_edit,)); data=cursor.fetchone()
-                notes = data["historical_level_notes"] if data and data["historical_level_notes"] else ""
-                json_txt = DEFAULT_COMPANY_OVERVIEW_JSON.replace("TICKER", ticker_edit)
-                # --- FIX: Correct indentation for try/except ---
-                if data and data["company_overview_card_json"]:
-                    try:
-                        json_txt = json.dumps(json.loads(data["company_overview_card_json"]), indent=2)
-                    except:
-                        json_txt = data["company_overview_card_json"]
-                # --- End FIX ---
-                with st.expander("Static: Historical Notes", expanded=True):
-                    with st.form(f"notes_form_{ticker_edit}"):
-                        notes_val = st.text_area("Notes:", value=notes, key=f"hist_{ticker_edit}", height=200)
-                        if st.form_submit_button("Save Notes", use_container_width=True):
-                            try: 
-                                cursor.execute("INSERT INTO stocks (ticker,historical_level_notes,last_updated) VALUES(?,?,?) ON CONFLICT(ticker) DO UPDATE SET historical_level_notes=excluded.historical_level_notes, last_updated=excluded.last_updated", (ticker_edit, notes_val, date.today().isoformat()))
-                                conn.commit(); st.success("Notes saved!"); 
-                                # if new_ticker: st.session_state.new_ticker_editor_text = "" # This was the error
-                                st.rerun()
-                            except sqlite3.Error as e: st.error(f"DB err: {e}")
-                st.markdown("---"); st.subheader("Dynamic: EOD Card (Editable)"); st.caption("Review/correct AI's EOD JSON.")
-                json_edit = st.text_area("EOD JSON:", value=json_txt, height=600, key=f"json_{ticker_edit}")
-                if st.button("Save EOD Card", use_container_width=True):
-                    try: 
-                        valid=json.loads(json_edit); json_save=json.dumps(valid, indent=2); 
-                        cursor.execute("INSERT INTO stocks (ticker,company_overview_card_json,last_updated) VALUES(?,?,?) ON CONFLICT(ticker) DO UPDATE SET company_overview_card_json=excluded.company_overview_card_json, last_updated=excluded.last_updated", (ticker_edit, json_save, date.today().isoformat()))
-                        conn.commit(); st.success("EOD Card saved!"); st.rerun()
-                    except json.JSONDecodeError: st.error("Invalid JSON.")
-                    except sqlite3.Error as e: st.error(f"DB err: {e}")
-            except sqlite3.Error as e: st.error(f"DB err: {e}")
-            finally:
-                if conn: conn.close()
-
-# --- TAB 2: Pipeline Runner (EOD - Workflow 1) (RESTRUCTURED) ---
+# --- TAB 1: Pipeline Runner (EOD - Workflow 1) ---
+# --- TAB 1: Pipeline Runner (EOD - Workflow 1) ---
 with tab_runner_eod:
     st.header("Pipeline Runner (EOD Update)")
     st.caption("Run EOD updates for individual stocks and the global economy card.")
@@ -1240,13 +1193,25 @@ with tab_runner_eod:
     with col_stocks:
         st.subheader("1. Individual Stock Updates")
         st.caption("`INPUT:` EOD Summary Text + Previous Day's Company Card + Historical Notes")
+
+        if st.button("▶️ Run Stock Processor", use_container_width=True, help="Runs the processor for all stocks and populates the text area below."):
+            with st.spinner("Running stock processor... This may take a few minutes."):
+                analysis_date = datetime.now(US_EASTERN).date() - timedelta(days=1)
+                output = generate_analysis_text(STOCK_TICKERS, analysis_date)
+                st.session_state.eod_raw_stocks = output
+            st.rerun()
+
         macro_context_input = st.text_area("Overall Market/Company News Summary:", height=120, key="eod_macro_context", help="A summary of the day's overall market sentiment or major news affecting your universe of stocks. This context will be given to the AI for EACH stock update.")
-        raw_txt_stocks = st.text_area("Paste Stock EOD Summaries:", height=300, key="eod_raw_stocks", help="Paste the text output from the processor app for individual stocks like AAPL, MSFT, etc.")
+        
+        st.text_area("Stock EOD Summaries:", height=300, key="eod_raw_stocks")
+
         if st.button("Run Stock EOD Updates", use_container_width=True, key="run_eod_stocks"):
-            if not raw_txt_stocks: st.warning("Paste stock summary text.")
-            elif not os.path.exists(DATABASE_FILE): st.error("Database file not found.")
+            if not st.session_state.eod_raw_stocks:
+                st.warning("Stock summary text is empty. Run the processor first.")
+            elif not os.path.exists(DATABASE_FILE):
+                st.error("Database file not found.")
             else:
-                summaries = re.split(r"(Summary:\s*\w+\s*\|)", raw_txt_stocks)
+                summaries = re.split(r"(Summary:\s*[\w.-]+\s*\|)", st.session_state.eod_raw_stocks)
                 processed = []
                 if len(summaries) > 1 and not summaries[0].strip().startswith("Summary:"):
                     if summaries[0].strip(): st.warning("Ignoring text before first summary.")
@@ -1254,7 +1219,8 @@ with tab_runner_eod:
                 for i in range(0, len(summaries), 2):
                     if i + 1 < len(summaries): processed.append(summaries[i] + summaries[i+1])
                 
-                if not processed: st.warning("No valid stock summaries found.")
+                if not processed:
+                    st.warning("No valid stock summaries found.")
                 else:
                     st.success(f"Found {len(processed)} stock summaries.")
                     logs_stocks = st.expander("Stock Update Logs", True)
@@ -1267,7 +1233,6 @@ with tab_runner_eod:
                             logger_stocks.log(f"SKIP: Could not parse ticker from summary: {s[:100]}...")
                             continue
                         try:
-                            # Pass the new macro context summary to the function
                             update_stock_note(ticker, s, macro_context_input, key, logger_stocks)
                         except Exception as e:
                             logger_stocks.log(f"!!! EOD ERROR for {ticker}: {e}")
@@ -1282,11 +1247,20 @@ with tab_runner_eod:
     with col_economy:
         st.subheader("2. Global Economy Card Update")
         st.caption("`INPUT:` Manual Macro Summary + ETF/Inter-Market EOD Summaries + Previous Day's Economy Card")
+        
+        if st.button("▶️ Run ETF Processor", use_container_width=True, help="Runs the processor for all ETFs and populates the text area below."):
+            with st.spinner("Running ETF processor... This may take a few minutes."):
+                analysis_date = datetime.now(US_EASTERN).date() - timedelta(days=1)
+                output = generate_analysis_text(ETF_TICKERS, analysis_date)
+                st.session_state.eod_raw_etfs = output
+            st.rerun()
+
         manual_macro_summary = st.text_area("Your Manual Daily Macro Summary:", height=100, key="eod_manual_macro", help="Your high-level take on the day's market action and news.")
-        raw_txt_etfs = st.text_area("Paste ETF EOD Summaries:", height=200, key="eod_raw_etfs", help="Paste the text output from the processor app for key ETFs like SPY, QQQ, XLF, etc.")
+        
+        st.text_area("Paste ETF EOD Summaries:", height=200, key="eod_raw_etfs", help="Paste the text output from the processor app for key ETFs like SPY, QQQ, XLF, etc.")
         
         if st.button("Run Economy Card EOD Update", use_container_width=True, key="run_eod_economy"):
-            if not manual_macro_summary or not raw_txt_etfs:
+            if not manual_macro_summary or not st.session_state.eod_raw_etfs:
                 st.warning("Please provide both a manual summary and ETF summaries.")
             elif not os.path.exists(DATABASE_FILE):
                 st.error("Database file not found.")
@@ -1296,11 +1270,165 @@ with tab_runner_eod:
                 key_eco = random.choice(API_KEYS)
                 with st.spinner("Updating Economy Card..."):
                     try:
-                        update_economy_card(manual_macro_summary, raw_txt_etfs, key_eco, logger_economy)
+                        update_economy_card(manual_macro_summary, st.session_state.eod_raw_etfs, key_eco, logger_economy)
                         st.success("Economy Card update process finished.")
                     except Exception as e:
                         logger_economy.log(f"!!! ECONOMY CARD EOD ERROR: {e}")
                         st.error("An error occurred during the Economy Card update.")
+
+
+
+
+# --- TAB 2: Context & EOD Card Editor ---
+with tab_editor:
+    st.header("Context & EOD Card Editor")
+    st.caption("Set `Historical Notes` & review/edit EOD Cards.")
+
+    # --- Economy Card Editor (NEW UI) ---
+    st.markdown("---")
+    st.subheader("Global Economy Card")
+    st.caption("This is the single, global context card for the entire market.")
+    
+    conn_eco = None
+    try:
+        conn_eco = sqlite3.connect(DATABASE_FILE)
+        cursor_eco = conn_eco.cursor()
+        cursor_eco.execute("SELECT economy_card_json FROM market_context WHERE context_id = 1")
+        eco_data_row = cursor_eco.fetchone()
+        
+        card_json_str = DEFAULT_ECONOMY_CARD_JSON
+        if eco_data_row and eco_data_row[0]:
+            card_json_str = eco_data_row[0]
+
+        try:
+            economy_card_data = json.loads(card_json_str)
+        except json.JSONDecodeError:
+            st.error("Could not decode the Global Economy Card JSON. Please fix it below or save a valid default.")
+            economy_card_data = json.loads(DEFAULT_ECONOMY_CARD_JSON)
+
+        if st.session_state.get('edit_mode_economy', False):
+            edited_data = display_editable_economy_card(economy_card_data)
+            if st.button("💾 Save Economy Card Changes", use_container_width=True, key="save_eco_card"):
+                try:
+                    new_card_json = json.dumps(edited_data, indent=2)
+                    cursor_eco.execute("UPDATE market_context SET economy_card_json = ?, last_updated = ? WHERE context_id = 1", (new_card_json, date.today().isoformat()))
+                    conn_eco.commit()
+                    st.success("Global Economy Card saved!")
+                    st.session_state.edit_mode_economy = False
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error saving Economy Card: {e}")
+        else:
+            display_view_economy_card(economy_card_data)
+
+    except sqlite3.Error as e:
+        st.error(f"Database error loading economy card: {e}")
+    finally:
+        if conn_eco:
+            conn_eco.close()
+
+    # --- Individual Stock Cards ---
+    st.markdown("---")
+    st.subheader("Individual Stock Cards")
+    if not os.path.exists(DATABASE_FILE): st.error(f"DB not found.")
+    else:
+        all_tickers = get_all_tickers_from_db()
+        
+        if not all_tickers:
+            st.warning("No tickers found in the database.")
+        else:
+            # --- NEW: Session State and Navigation Logic ---
+            # Initialize state if it doesn't exist
+            if 'ticker_index' not in st.session_state:
+                st.session_state.ticker_index = 0
+            if 'ticker_selector' not in st.session_state:
+                st.session_state.ticker_selector = all_tickers[st.session_state.ticker_index] if all_tickers else None
+
+            # This is the key: Sync the index with the selector's current value.
+            # This handles updates from both the selectbox itself and the buttons.
+            try:
+                if all_tickers:
+                    st.session_state.ticker_index = all_tickers.index(st.session_state.ticker_selector)
+            except (ValueError, IndexError):
+                # If the selected ticker is no longer in the list, reset to the first one.
+                st.session_state.ticker_index = 0
+                if all_tickers:
+                    st.session_state.ticker_selector = all_tickers[0]
+
+            # The selectbox's state is now managed by the 'ticker_selector' key.
+            selected_ticker = st.selectbox(
+                "Select Ticker to View/Edit",
+                all_tickers,
+                index=st.session_state.ticker_index,
+                key='ticker_selector'
+            )
+            # --- END NEW ---
+
+            # The rest of the logic uses the selected_ticker from the selectbox
+            conn_stock = None
+            try:
+                conn_stock = sqlite3.connect(DATABASE_FILE)
+                cursor_stock = conn_stock.cursor()
+                cursor_stock.execute("SELECT historical_level_notes, company_overview_card_json FROM stocks WHERE ticker = ?", (selected_ticker,))
+                stock_data = cursor_stock.fetchone()
+
+                notes = stock_data[0] if stock_data else ""
+                card_json = stock_data[1] if stock_data and stock_data[1] else DEFAULT_COMPANY_OVERVIEW_JSON.replace("TICKER", selected_ticker)
+
+                with st.form("historical_notes_form"):
+                    new_notes = st.text_area("Historical Level Notes (Major Levels)", value=notes, height=150)
+                    if st.form_submit_button("Save Historical Notes", use_container_width=True):
+                        cursor_stock.execute("UPDATE stocks SET historical_level_notes = ? WHERE ticker = ?", (new_notes, selected_ticker))
+                        if cursor_stock.rowcount == 0:
+                             cursor_stock.execute("INSERT INTO stocks (ticker, historical_level_notes) VALUES (?, ?)", (selected_ticker, new_notes))
+                        conn_stock.commit()
+                        st.success(f"Historical notes for {selected_ticker} saved!")
+                        st.rerun()
+
+                st.divider()
+                
+                try:
+                    card_data = json.loads(card_json)
+                except json.JSONDecodeError:
+                    st.error("Could not decode the company overview card JSON. Displaying raw text.")
+                    st.code(card_json)
+                    st.stop()
+
+                if st.session_state.get('edit_mode', False):
+                    edited_data = display_editable_market_note_card(card_data)
+                    # The save button is inside the display function, which handles its own rerun
+                    
+                else:
+                    display_view_market_note_card(card_data)
+
+                # --- NEW: Previous/Next Buttons ---
+                st.divider()
+                col_prev, col_spacer, col_next = st.columns([1, 5, 1])
+
+                def go_prev():
+                    # This function now updates the SELECTOR, not just the index.
+                    new_index = st.session_state.ticker_index - 1
+                    if new_index >= 0:
+                        st.session_state.ticker_selector = all_tickers[new_index]
+
+                def go_next():
+                    # This function now updates the SELECTOR, not just the index.
+                    new_index = st.session_state.ticker_index + 1
+                    if new_index < len(all_tickers):
+                        st.session_state.ticker_selector = all_tickers[new_index]
+
+                with col_prev:
+                    st.button("⬅️ Previous", on_click=go_prev, use_container_width=True, disabled=(st.session_state.ticker_index <= 0))
+                
+                with col_next:
+                    st.button("Next ➡️", on_click=go_next, use_container_width=True, disabled=(st.session_state.ticker_index >= len(all_tickers) - 1))
+                # --- END NEW ---
+
+            except sqlite3.Error as e:
+                st.error(f"Database error for {selected_ticker}: {e}")
+            finally:
+                if conn_stock:
+                    conn_stock.close()
 
 
 # --- TAB 3: Pre-Flight Check (Workflow 2a) (RESTRUCTURED) ---
@@ -1337,8 +1465,8 @@ with tab_preflight:
 
     # Display the generated card for confirmation
     if st.session_state.premarket_economy_card:
-        with st.expander("View Generated Pre-Market Economy Card", expanded=False):
-            st.json(st.session_state.premarket_economy_card)
+        with st.expander("View Generated Pre-Market Economy Card", expanded=True):
+            display_view_economy_card(st.session_state.premarket_economy_card, key_prefix="pm_eco_view")
 
     # Step 3: Company Card Workflow
     st.markdown("---")
@@ -1514,8 +1642,3 @@ with tab_screener:
                 st.markdown("---"); st.subheader(f"Ranked Briefings (Filter: {conf_filter_s})")
                 if result_scr: st.markdown(result_scr, unsafe_allow_html=True)
                 else: st.error("Screener failed to return results.")
-
-
-# --- Command Line Test Example (Unchanged) ---
-if __name__ == "__main__":
-    print("Run with: streamlit run pipeline_engine.py")

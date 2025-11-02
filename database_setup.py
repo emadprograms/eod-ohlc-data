@@ -1,3 +1,16 @@
+"""
+This script sets up the SQLite database for the EOD-OHLC data analysis application.
+
+It defines the database schema and creates the necessary tables:
+- `stocks`: Stores historical notes and AI-generated "living document" JSON for each stock.
+- `data_archive`: Archives raw 5-minute summary text and parsed OHLC data.
+- `market_context`: Holds a single, global "Economy Card" for overall market analysis.
+
+The `create_database` function initializes the database file and tables, ensuring they
+are ready for the application to use. Running this script directly will create the
+database file (`analysis_database.db`) in the same directory.
+"""
+
 import sqlite3
 import os
 
